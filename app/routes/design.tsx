@@ -14,14 +14,18 @@
 // that same scale - keeping everything proportionally correct.
 
 import { useRef } from "react";
-import { Link } from "react-router";
+import { Form, Link, redirect } from "react-router";
 import {
   DndContext,
   useDraggable,
   useDroppable,
   type DragEndEvent,
 } from "@dnd-kit/core";
-import { getProducts, type ShopifyProduct } from "~/lib/shopify.server";
+import {
+  createCartCheckoutUrl,
+  getProducts,
+  type ShopifyProduct,
+} from "~/lib/shopify.server";
 import { useRoomStore, type PlacedItem } from "~/store/roomStore";
 import type { Route } from "./+types/design";
 
@@ -34,6 +38,37 @@ function clamp(value: number, min: number, max: number) {
 export async function loader() {
   const products = await getProducts();
   return { products };
+}
+
+// This runs on the SERVER whenever the "Buy this room" form below is
+// submitted. The browser sends the placed items (as JSON, in a hidden
+// field) to this route as a normal form POST; we parse them back out,
+// create a real Shopify cart from them, and redirect the browser
+// straight to Shopify's own checkout page for that cart. We never build
+// our own checkout UI - Shopify's hosted one handles payment, taxes,
+// shipping, all of it.
+export async function action({ request }: Route.ActionArgs) {
+  const formData = await request.formData();
+  const linesJson = formData.get("lines");
+
+  if (typeof linesJson !== "string") {
+    throw new Response("Missing cart lines", { status: 400 });
+  }
+
+  const lines: Array<{ variantId: string; quantity: number }> =
+    JSON.parse(linesJson);
+
+  if (lines.length === 0) {
+    throw new Response("Cannot check out an empty room", { status: 400 });
+  }
+
+  const checkoutUrl = await createCartCheckoutUrl(lines);
+
+  // redirect() tells the browser to navigate to Shopify's checkout page.
+  // Because this came from a real <Form> submission (not a background
+  // fetch), the browser genuinely leaves our app and lands on Shopify's
+  // hosted, secure checkout - exactly like a real store.
+  return redirect(checkoutUrl);
 }
 
 export default function Design({ loaderData }: Route.ComponentProps) {
@@ -93,9 +128,10 @@ export default function Design({ loaderData }: Route.ComponentProps) {
       const depthCm = product.depthCm ?? 60;
       const heightCm = product.heightCm ?? 80;
 
-      addItem({
+    addItem({
         id: crypto.randomUUID(),
         productId: product.id,
+        variantId: product.variantId,
         title: product.title,
         price: product.price,
         currencyCode: product.currencyCode,
@@ -188,9 +224,47 @@ export default function Design({ loaderData }: Route.ComponentProps) {
               textDecoration: "none",
               fontSize: 13,
             }}
-          >
+                    >
             View in 3D →
           </Link>
+
+          {/* This <Form> is a real HTML form submission (not a fetch
+              call) - when clicked, the browser POSTs to this same
+              route's `action` function above, which creates the
+              Shopify cart and redirects the whole browser to checkout.
+              The hidden input carries the current room's items as JSON
+              since a form field can only hold text, not JS objects
+              directly. */}
+          <Form method="post">
+            <input
+              type="hidden"
+              name="lines"
+              value={JSON.stringify(
+                placedItems.map((item) => ({
+                  variantId: item.variantId,
+                  quantity: 1,
+                }))
+              )}
+            />
+            <button
+              type="submit"
+              disabled={placedItems.length === 0}
+              style={{
+                display: "block",
+                marginTop: 8,
+                padding: "8px 16px",
+                background: placedItems.length === 0 ? "#ccc" : "#111",
+                color: "#fff",
+                border: "none",
+                borderRadius: 6,
+                fontSize: 13,
+                cursor: placedItems.length === 0 ? "not-allowed" : "pointer",
+                width: "100%",
+              }}
+            >
+              Buy this room →
+            </button>
+          </Form>
         </div>
       </div>
     </DndContext>

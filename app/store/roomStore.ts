@@ -15,6 +15,9 @@ export type PlacedItem = {
   id: string; // a unique id for this *placed instance* - not the product id,
   // since the same product could be placed in the room more than once
   productId: string;
+  // needed to actually add this item to a real Shopify cart later -
+  // see the note on ShopifyProduct.variantId in shopify.server.ts
+  variantId: string;
   title: string;
   price: string;
   currencyCode: string;
