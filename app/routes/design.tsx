@@ -173,9 +173,24 @@ export default function Design({ loaderData }: Route.ComponentProps) {
           <p style={{ fontSize: 13, color: "#666" }}>
             {placedItems.length} item(s) placed
           </p>
-          <p style={{ fontSize: 18, fontWeight: 700 }}>
+                    <p style={{ fontSize: 18, fontWeight: 700 }}>
             {cartTotal.toFixed(2)} {currencyCode}
           </p>
+          <Link
+            to="/walkthrough"
+            style={{
+              display: "inline-block",
+              marginTop: 12,
+              padding: "8px 16px",
+              background: "#111",
+              color: "#fff",
+              borderRadius: 6,
+              textDecoration: "none",
+              fontSize: 13,
+            }}
+          >
+            View in 3D →
+          </Link>
         </div>
       </div>
     </DndContext>
