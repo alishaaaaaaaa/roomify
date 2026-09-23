@@ -15,6 +15,7 @@ import { Link } from "react-router";
 import { Canvas } from "@react-three/fiber";
 import { OrbitControls } from "@react-three/drei";
 import { DoubleSide } from "three";
+import { StepNav } from "~/components/StepNav";
 import { useRoomStore } from "~/store/roomStore";
 
 export default function Walkthrough() {
@@ -34,13 +35,20 @@ export default function Walkthrough() {
   const lengthM = dimensions.lengthCm / 100;
   const heightM = dimensions.heightCm / 100;
 
-  return (
-    <div style={{ fontFamily: "sans-serif" }}>
-      <div style={{ padding: 16 }}>
-        <Link to="/design">← Back to floor plan</Link>
+    return (
+    <div className="min-h-screen bg-stone-50 dark:bg-stone-950">
+      <StepNav />
+
+      <div className="mx-auto max-w-6xl px-6 py-4">
+        <Link
+          to="/design"
+          className="text-xs font-medium text-stone-500 hover:text-stone-900 dark:text-stone-400 dark:hover:text-stone-100"
+        >
+          ← Back to floor plan
+        </Link>
       </div>
 
-      <div style={{ width: "100%", height: "70vh", background: "#333" }}>
+      <div className="mx-auto h-[70vh] max-w-6xl overflow-hidden rounded-2xl bg-stone-800 px-0 shadow-inner sm:mx-6">
         {mounted ? (
           <Canvas
             camera={{
@@ -116,7 +124,7 @@ export default function Walkthrough() {
             <OrbitControls target={[widthM / 2, heightM / 2, lengthM / 2]} />
           </Canvas>
         ) : (
-          <div style={{ color: "#fff", padding: 24 }}>Loading 3D view…</div>
+                    <div className="p-6 text-sm text-stone-300">Loading 3D view…</div>
         )}
       </div>
     </div>

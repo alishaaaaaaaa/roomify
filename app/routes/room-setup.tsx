@@ -1,9 +1,10 @@
-// The very first screen the user sees: pick room dimensions and colors
-// before furnishing it. Every input here is directly wired to the
-// Zustand store, so as soon as the user changes a value, it's saved to
-// shared state immediately - no separate "save" step needed for this part.
+// The room setup screen: pick room dimensions and colors before
+// furnishing it. Every input here is directly wired to the Zustand
+// store, so as soon as the user changes a value, it's saved to shared
+// state immediately - no separate "save" step needed for this part.
 
 import { useNavigate } from "react-router";
+import { StepNav } from "~/components/StepNav";
 import { useRoomStore } from "~/store/roomStore";
 
 export default function RoomSetup() {
@@ -17,82 +18,117 @@ export default function RoomSetup() {
   const setFloorColor = useRoomStore((state) => state.setFloorColor);
 
   return (
-    <div style={{ padding: 24, fontFamily: "sans-serif", maxWidth: 480 }}>
-      <h1>Set up your room</h1>
-      <p style={{ color: "#666" }}>
-        Enter your room's real dimensions in centimeters, then pick wall and
-        floor colors.
-      </p>
+    <div className="min-h-screen bg-stone-50 dark:bg-stone-950">
+      <StepNav />
 
-      <label style={{ display: "block", marginBottom: 12 }}>
-        Width (cm)
-        <input
-          type="number"
-          value={dimensions.widthCm}
-          onChange={(e) =>
-            setDimensions({ ...dimensions, widthCm: Number(e.target.value) })
-          }
-          style={{ display: "block", width: "100%", padding: 8, marginTop: 4 }}
-        />
-      </label>
+      <main className="mx-auto max-w-xl px-6 py-12">
+        <h1 className="text-2xl font-semibold tracking-tight text-stone-900 dark:text-stone-100">
+          Set up your room
+        </h1>
+        <p className="mt-1 text-sm text-stone-500 dark:text-stone-400">
+          Enter your room's real dimensions in centimeters, then pick wall
+          and floor colors.
+        </p>
 
-      <label style={{ display: "block", marginBottom: 12 }}>
-        Length (cm)
-        <input
-          type="number"
-          value={dimensions.lengthCm}
-          onChange={(e) =>
-            setDimensions({ ...dimensions, lengthCm: Number(e.target.value) })
-          }
-          style={{ display: "block", width: "100%", padding: 8, marginTop: 4 }}
-        />
-      </label>
+        <div className="mt-8 space-y-6 rounded-2xl border border-stone-200 bg-white p-6 shadow-sm dark:border-stone-800 dark:bg-stone-900">
+          <div className="grid grid-cols-3 gap-4">
+            <NumberField
+              label="Width (cm)"
+              value={dimensions.widthCm}
+              onChange={(value) =>
+                setDimensions({ ...dimensions, widthCm: value })
+              }
+            />
+            <NumberField
+              label="Length (cm)"
+              value={dimensions.lengthCm}
+              onChange={(value) =>
+                setDimensions({ ...dimensions, lengthCm: value })
+              }
+            />
+            <NumberField
+              label="Height (cm)"
+              value={dimensions.heightCm}
+              onChange={(value) =>
+                setDimensions({ ...dimensions, heightCm: value })
+              }
+            />
+          </div>
 
-      <label style={{ display: "block", marginBottom: 12 }}>
-        Ceiling height (cm)
-        <input
-          type="number"
-          value={dimensions.heightCm}
-          onChange={(e) =>
-            setDimensions({ ...dimensions, heightCm: Number(e.target.value) })
-          }
-          style={{ display: "block", width: "100%", padding: 8, marginTop: 4 }}
-        />
-      </label>
+          <div className="grid grid-cols-2 gap-4">
+            <ColorField
+              label="Wall color"
+              value={wallColor}
+              onChange={setWallColor}
+            />
+            <ColorField
+              label="Floor color"
+              value={floorColor}
+              onChange={setFloorColor}
+            />
+          </div>
+        </div>
 
-      <label style={{ display: "block", marginBottom: 12 }}>
-        Wall color
-        <input
-          type="color"
-          value={wallColor}
-          onChange={(e) => setWallColor(e.target.value)}
-          style={{ display: "block", marginTop: 4 }}
-        />
-      </label>
-
-      <label style={{ display: "block", marginBottom: 20 }}>
-        Floor color
-        <input
-          type="color"
-          value={floorColor}
-          onChange={(e) => setFloorColor(e.target.value)}
-          style={{ display: "block", marginTop: 4 }}
-        />
-      </label>
-
-      <button
-        onClick={() => navigate("/design")}
-        style={{
-          padding: "10px 20px",
-          background: "#111",
-          color: "#fff",
-          border: "none",
-          borderRadius: 6,
-          cursor: "pointer",
-        }}
-      >
-        Continue to layout →
-      </button>
+        <button
+          onClick={() => navigate("/design")}
+          className="mt-6 w-full rounded-full bg-stone-900 px-6 py-3 text-sm font-medium text-white transition-colors hover:bg-stone-700 dark:bg-stone-100 dark:text-stone-900 dark:hover:bg-white"
+        >
+          Continue to floor plan →
+        </button>
+      </main>
     </div>
+  );
+}
+
+function NumberField({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: number;
+  onChange: (value: number) => void;
+}) {
+  return (
+    <label className="block">
+      <span className="text-xs font-medium text-stone-500 dark:text-stone-400">
+        {label}
+      </span>
+      <input
+        type="number"
+        value={value}
+        onChange={(e) => onChange(Number(e.target.value))}
+        className="mt-1 w-full rounded-lg border border-stone-300 bg-white px-3 py-2 text-sm text-stone-900 focus:border-stone-500 focus:outline-none dark:border-stone-700 dark:bg-stone-800 dark:text-stone-100"
+      />
+    </label>
+  );
+}
+
+function ColorField({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <label className="block">
+      <span className="text-xs font-medium text-stone-500 dark:text-stone-400">
+        {label}
+      </span>
+      <div className="mt-1 flex items-center gap-2 rounded-lg border border-stone-300 bg-white px-3 py-2 dark:border-stone-700 dark:bg-stone-800">
+        <input
+          type="color"
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          className="h-6 w-6 cursor-pointer rounded border-none bg-transparent p-0"
+        />
+        <span className="text-sm text-stone-500 dark:text-stone-400">
+          {value}
+        </span>
+      </div>
+    </label>
   );
 }
