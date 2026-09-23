@@ -1,106 +1,343 @@
-// The room setup screen: pick room dimensions and colors before
-// furnishing it. Every input here is directly wired to the Zustand
-// store, so as soon as the user changes a value, it's saved to shared
-// state immediately - no separate "save" step needed for this part.
+// The room setup screen. This used to be three number inputs (width,
+// length, height). Now it's a real drawing tool: click points on a grid
+// to trace your room's actual outline - straight rectangle, L-shape,
+// an alcove, whatever your real room looks like - then fine-tune each
+// corner by dragging it, or typing exact measurements below.
 
+import { useRef, useState } from "react";
 import { useNavigate } from "react-router";
 import { StepNav } from "~/components/StepNav";
 import { useRoomStore } from "~/store/roomStore";
+import type { RoomPoint } from "~/lib/geometry";
+
+// The drawing canvas represents an 800cm x 800cm (8m x 8m) working
+// area - generous for most rooms - mapped onto a fixed-size on-screen
+// grid. GRID_PX / GRID_CM gives us "pixels per centimeter" for this
+// screen only (separate from the floor plan's own scale later).
+const GRID_CM = 800;
+const GRID_PX = 560;
+const SCALE = GRID_PX / GRID_CM;
+const SNAP_CM = 10; // clicks/drags snap to the nearest 10cm, so corners
+// come out as clean round numbers instead of stray decimals
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(Math.max(value, min), max);
+}
+
+function snap(cm: number) {
+  return clamp(Math.round(cm / SNAP_CM) * SNAP_CM, 0, GRID_CM);
+}
 
 export default function RoomSetup() {
   const navigate = useNavigate();
+  const svgRef = useRef<SVGSVGElement | null>(null);
 
-  const dimensions = useRoomStore((state) => state.dimensions);
+  const shape = useRoomStore((state) => state.shape);
   const wallColor = useRoomStore((state) => state.wallColor);
   const floorColor = useRoomStore((state) => state.floorColor);
-  const setDimensions = useRoomStore((state) => state.setDimensions);
+  const setShape = useRoomStore((state) => state.setShape);
   const setWallColor = useRoomStore((state) => state.setWallColor);
   const setFloorColor = useRoomStore((state) => state.setFloorColor);
+
+  // Whether the shape is "finished" (a closed polygon you can drag
+  // corners of) or still being drawn (an open line you're adding points
+  // to). This is a purely visual/editing distinction, so it lives here
+  // as local state rather than in the shared store.
+  const [isClosed, setIsClosed] = useState(shape.points.length >= 3);
+
+  function pointFromEvent(e: { clientX: number; clientY: number }): RoomPoint {
+    const rect = svgRef.current!.getBoundingClientRect();
+    return {
+      x: snap((e.clientX - rect.left) / SCALE),
+      z: snap((e.clientY - rect.top) / SCALE),
+    };
+  }
+
+  function handleCanvasClick(e: React.MouseEvent<SVGSVGElement>) {
+    if (isClosed) return; // once closed, clicking the canvas does nothing -
+    // corners are adjusted by dragging them instead
+    const point = pointFromEvent(e);
+    setShape({ ...shape, points: [...shape.points, point] });
+  }
+
+  function handleCornerDrag(index: number, point: RoomPoint) {
+    const nextPoints = shape.points.map((p, i) => (i === index ? point : p));
+    setShape({ ...shape, points: nextPoints });
+  }
+
+  function handleUndo() {
+    setShape({ ...shape, points: shape.points.slice(0, -1) });
+  }
+
+  function handleStartOver() {
+    setShape({ ...shape, points: [] });
+    setIsClosed(false);
+  }
+
+  function handleRemovePoint(index: number) {
+    if (shape.points.length <= 3) return; // a room needs at least 3 corners
+    setShape({
+      ...shape,
+      points: shape.points.filter((_, i) => i !== index),
+    });
+  }
+
+  const canFinish = shape.points.length >= 3;
 
   return (
     <div className="min-h-screen bg-stone-50 dark:bg-stone-950">
       <StepNav />
 
-      <main className="mx-auto max-w-xl px-6 py-12">
+      <main className="mx-auto max-w-4xl px-6 py-12">
         <h1 className="text-2xl font-semibold tracking-tight text-stone-900 dark:text-stone-100">
-          Set up your room
+          Draw your room
         </h1>
         <p className="mt-1 text-sm text-stone-500 dark:text-stone-400">
-          Enter your room's real dimensions in centimeters, then pick wall
-          and floor colors.
+          {isClosed
+            ? "Drag a corner to adjust it, or fine-tune exact measurements below."
+            : "Click to place each corner of your room, in order around the edge. You need at least 3 points."}
         </p>
 
-        <div className="mt-8 space-y-6 rounded-2xl border border-stone-200 bg-white p-6 shadow-sm dark:border-stone-800 dark:bg-stone-900">
-          <div className="grid grid-cols-3 gap-4">
-            <NumberField
-              label="Width (cm)"
-              value={dimensions.widthCm}
-              onChange={(value) =>
-                setDimensions({ ...dimensions, widthCm: value })
-              }
-            />
-            <NumberField
-              label="Length (cm)"
-              value={dimensions.lengthCm}
-              onChange={(value) =>
-                setDimensions({ ...dimensions, lengthCm: value })
-              }
-            />
-            <NumberField
-              label="Height (cm)"
-              value={dimensions.heightCm}
-              onChange={(value) =>
-                setDimensions({ ...dimensions, heightCm: value })
-              }
-            />
+        <div className="mt-6 flex flex-col gap-6 sm:flex-row">
+          <div className="flex-shrink-0">
+            <svg
+              ref={svgRef}
+              width={GRID_PX}
+              height={GRID_PX}
+              onClick={handleCanvasClick}
+              className="rounded-2xl border border-stone-200 bg-white shadow-sm dark:border-stone-800 dark:bg-stone-900"
+              style={{ cursor: isClosed ? "default" : "crosshair" }}
+            >
+              {/* Reference grid, every 50cm, purely visual */}
+              {Array.from({ length: GRID_CM / 50 + 1 }, (_, i) => i * 50).map(
+                (cm) => (
+                  <g key={cm}>
+                    <line
+                      x1={cm * SCALE}
+                      y1={0}
+                      x2={cm * SCALE}
+                      y2={GRID_PX}
+                      stroke="currentColor"
+                      className="text-stone-100 dark:text-stone-800"
+                    />
+                    <line
+                      x1={0}
+                      y1={cm * SCALE}
+                      x2={GRID_PX}
+                      y2={cm * SCALE}
+                      stroke="currentColor"
+                      className="text-stone-100 dark:text-stone-800"
+                    />
+                  </g>
+                )
+              )}
+
+              {/* The room shape itself: filled polygon once closed, an
+                  open dashed line while still being drawn */}
+              {shape.points.length > 0 &&
+                (isClosed ? (
+                  <polygon
+                    points={shape.points
+                      .map((p) => `${p.x * SCALE},${p.z * SCALE}`)
+                      .join(" ")}
+                    fill={floorColor}
+                    stroke={wallColor}
+                    strokeWidth={10}
+                    strokeLinejoin="round"
+                  />
+                ) : (
+                  <polyline
+                    points={shape.points
+                      .map((p) => `${p.x * SCALE},${p.z * SCALE}`)
+                      .join(" ")}
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth={2}
+                    strokeDasharray="6 4"
+                    className="text-stone-400"
+                  />
+                ))}
+
+              {/* One draggable (once closed) or plain (while drawing)
+                  handle per corner */}
+              {shape.points.map((point, index) => (
+                <CornerHandle
+                  key={index}
+                  point={point}
+                  draggable={isClosed}
+                  svgRef={svgRef}
+                  onDrag={(next) => handleCornerDrag(index, next)}
+                />
+              ))}
+            </svg>
+
+            <div className="mt-3 flex flex-wrap gap-2">
+              {!isClosed && (
+                <>
+                  <button
+                    onClick={handleUndo}
+                    disabled={shape.points.length === 0}
+                    className="rounded-full border border-stone-300 px-3 py-1.5 text-xs font-medium text-stone-700 hover:bg-stone-100 disabled:opacity-40 dark:border-stone-700 dark:text-stone-300 dark:hover:bg-stone-800"
+                  >
+                    Undo last point
+                  </button>
+                  <button
+                    onClick={() => setIsClosed(true)}
+                    disabled={!canFinish}
+                    className="rounded-full bg-stone-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-stone-700 disabled:opacity-40 dark:bg-stone-100 dark:text-stone-900"
+                  >
+                    Finish shape
+                  </button>
+                </>
+              )}
+              {isClosed && (
+                <button
+                  onClick={handleStartOver}
+                  className="rounded-full border border-stone-300 px-3 py-1.5 text-xs font-medium text-stone-700 hover:bg-stone-100 dark:border-stone-700 dark:text-stone-300 dark:hover:bg-stone-800"
+                >
+                  Start over
+                </button>
+              )}
+            </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-4">
-            <ColorField
-              label="Wall color"
-              value={wallColor}
-              onChange={setWallColor}
-            />
-            <ColorField
-              label="Floor color"
-              value={floorColor}
-              onChange={setFloorColor}
-            />
+          <div className="flex-1 space-y-6">
+            {/* Precise numeric editing, for anyone who'd rather type
+                exact measurements than eyeball them by dragging */}
+            {shape.points.length > 0 && (
+              <div className="rounded-2xl border border-stone-200 bg-white p-4 shadow-sm dark:border-stone-800 dark:bg-stone-900">
+                <h2 className="text-xs font-semibold text-stone-500 dark:text-stone-400">
+                  Corners (cm)
+                </h2>
+                <div className="mt-2 space-y-2">
+                  {shape.points.map((point, index) => (
+                    <div key={index} className="flex items-center gap-2">
+                      <span className="w-4 text-xs text-stone-400">
+                        {index + 1}
+                      </span>
+                      <input
+                        type="number"
+                        value={point.x}
+                        onChange={(e) =>
+                          handleCornerDrag(index, {
+                            ...point,
+                            x: Number(e.target.value),
+                          })
+                        }
+                        className="w-20 rounded-md border border-stone-300 bg-white px-2 py-1 text-sm dark:border-stone-700 dark:bg-stone-800"
+                      />
+                      <span className="text-xs text-stone-400">x</span>
+                      <input
+                        type="number"
+                        value={point.z}
+                        onChange={(e) =>
+                          handleCornerDrag(index, {
+                            ...point,
+                            z: Number(e.target.value),
+                          })
+                        }
+                        className="w-20 rounded-md border border-stone-300 bg-white px-2 py-1 text-sm dark:border-stone-700 dark:bg-stone-800"
+                      />
+                      <button
+                        onClick={() => handleRemovePoint(index)}
+                        disabled={shape.points.length <= 3}
+                        className="ml-auto text-xs text-red-600 hover:text-red-800 disabled:opacity-30"
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div className="rounded-2xl border border-stone-200 bg-white p-4 shadow-sm dark:border-stone-800 dark:bg-stone-900">
+              <label className="block">
+                <span className="text-xs font-medium text-stone-500 dark:text-stone-400">
+                  Ceiling height (cm)
+                </span>
+                <input
+                  type="number"
+                  value={shape.heightCm}
+                  onChange={(e) =>
+                    setShape({ ...shape, heightCm: Number(e.target.value) })
+                  }
+                  className="mt-1 w-full rounded-lg border border-stone-300 bg-white px-3 py-2 text-sm dark:border-stone-700 dark:bg-stone-800"
+                />
+              </label>
+
+              <div className="mt-4 grid grid-cols-2 gap-4">
+                <ColorField
+                  label="Wall color"
+                  value={wallColor}
+                  onChange={setWallColor}
+                />
+                <ColorField
+                  label="Floor color"
+                  value={floorColor}
+                  onChange={setFloorColor}
+                />
+              </div>
+            </div>
+
+            <button
+              onClick={() => navigate("/design")}
+              disabled={!isClosed}
+              className="w-full rounded-full bg-stone-900 px-6 py-3 text-sm font-medium text-white transition-colors hover:bg-stone-700 disabled:opacity-40 dark:bg-stone-100 dark:text-stone-900 dark:hover:bg-white"
+            >
+              Continue to floor plan →
+            </button>
           </div>
         </div>
-
-        <button
-          onClick={() => navigate("/design")}
-          className="mt-6 w-full rounded-full bg-stone-900 px-6 py-3 text-sm font-medium text-white transition-colors hover:bg-stone-700 dark:bg-stone-100 dark:text-stone-900 dark:hover:bg-white"
-        >
-          Continue to floor plan →
-        </button>
       </main>
     </div>
   );
 }
 
-function NumberField({
-  label,
-  value,
-  onChange,
+function CornerHandle({
+  point,
+  draggable,
+  svgRef,
+  onDrag,
 }: {
-  label: string;
-  value: number;
-  onChange: (value: number) => void;
+  point: RoomPoint;
+  draggable: boolean;
+  svgRef: React.RefObject<SVGSVGElement | null>;
+  onDrag: (point: RoomPoint) => void;
 }) {
+  // Pointer capture is the trick that makes free dragging simple: once
+  // captured on pointer-down, this exact element keeps receiving
+  // pointermove/pointerup events even if the cursor moves outside its
+  // boundaries - no need for manual window-level event listeners.
+  function handlePointerDown(e: React.PointerEvent<SVGCircleElement>) {
+    if (!draggable) return;
+    e.currentTarget.setPointerCapture(e.pointerId);
+  }
+
+  function handlePointerMove(e: React.PointerEvent<SVGCircleElement>) {
+    if (!draggable) return;
+    if (!e.currentTarget.hasPointerCapture(e.pointerId)) return;
+    if (!svgRef.current) return;
+
+    const rect = svgRef.current.getBoundingClientRect();
+    onDrag({
+      x: snap((e.clientX - rect.left) / SCALE),
+      z: snap((e.clientY - rect.top) / SCALE),
+    });
+  }
+
   return (
-    <label className="block">
-      <span className="text-xs font-medium text-stone-500 dark:text-stone-400">
-        {label}
-      </span>
-      <input
-        type="number"
-        value={value}
-        onChange={(e) => onChange(Number(e.target.value))}
-        className="mt-1 w-full rounded-lg border border-stone-300 bg-white px-3 py-2 text-sm text-stone-900 focus:border-stone-500 focus:outline-none dark:border-stone-700 dark:bg-stone-800 dark:text-stone-100"
-      />
-    </label>
+    <circle
+      cx={point.x * SCALE}
+      cy={point.z * SCALE}
+      r={7}
+      fill="#57534e"
+      stroke="white"
+      strokeWidth={2}
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      style={{ cursor: draggable ? "grab" : "default" }}
+    />
   );
 }
 

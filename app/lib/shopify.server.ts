@@ -43,6 +43,12 @@ export type ShopifyProduct = {
   widthCm: number | null;
   heightCm: number | null;
   depthCm: number | null;
+  // A real 3D model (.glb) for this exact product, if the merchant has
+  // uploaded one to Shopify's AR/3D media field - see the long comment
+  // on the `media` part of PRODUCTS_QUERY below for how this is found.
+  // null means no model is attached yet, and callers should fall back
+  // to a plain placeholder box.
+  modelUrl: string | null;
 };
 
 const PRODUCTS_QUERY = gql`
@@ -56,7 +62,7 @@ const PRODUCTS_QUERY = gql`
           featuredImage {
             url
           }
-                    priceRange {
+          priceRange {
             minVariantPrice {
               amount
               currencyCode
@@ -78,11 +84,35 @@ const PRODUCTS_QUERY = gql`
           depthMeta: metafield(namespace: "custom", key: "depth_cm") {
             value
           }
+          # A product's "media" can include photos AND a 3D model,
+          # uploaded in the Shopify admin under that product's Media
+          # section (the same feature that powers "View in AR" on a
+          # storefront). Model3d is Shopify's own media type for that -
+          # this is the actual model file for THIS product, not a
+          # lookalike, which is why this is worth pulling in even though
+          # most stores won't have one uploaded yet.
+          media(first: 10) {
+            edges {
+              node {
+                __typename
+                ... on Model3d {
+                  sources {
+                    url
+                    format
+                  }
+                }
+              }
+            }
+          }
         }
       }
     }
   }
 `;
+
+type ProductMediaNode =
+  | { __typename: "Model3d"; sources: Array<{ url: string; format: string }> }
+  | { __typename: string; sources?: undefined };
 
 type ProductsQueryResponse = {
   products: {
@@ -92,24 +122,41 @@ type ProductsQueryResponse = {
         title: string;
         description: string;
         featuredImage: { url: string } | null;
-                priceRange: {
+        priceRange: {
           minVariantPrice: { amount: string; currencyCode: string };
         };
         variants: { edges: Array<{ node: { id: string } }> };
         widthMeta: { value: string } | null;
         heightMeta: { value: string } | null;
         depthMeta: { value: string } | null;
+        media: { edges: Array<{ node: ProductMediaNode }> };
       };
     }>;
   };
 };
+
+// Three.js (what the 3D walkthrough is built on) loads glTF/.glb files
+// directly, so that's the format we look for among a Model3d's sources.
+// Shopify also auto-generates a .usdz version of the same model for
+// Apple's AR Quick Look - that one's for iOS's native AR viewer, not
+// for us, so it's deliberately skipped here.
+function findModelUrl(media: { edges: Array<{ node: ProductMediaNode }> }) {
+  for (const { node } of media.edges) {
+    if (node.__typename !== "Model3d" || !node.sources) continue;
+    const glb = node.sources.find(
+      (source) => source.format.toLowerCase() === "glb"
+    );
+    if (glb) return glb.url;
+  }
+  return null;
+}
 
 export async function getProducts(first = 20): Promise<ShopifyProduct[]> {
   const data = await client.request<ProductsQueryResponse>(PRODUCTS_QUERY, {
     first,
   });
 
-return data.products.edges.map(({ node }) => ({
+  return data.products.edges.map(({ node }) => ({
     id: node.id,
     variantId: node.variants.edges[0]?.node.id ?? "",
     title: node.title,
@@ -120,9 +167,9 @@ return data.products.edges.map(({ node }) => ({
     widthCm: node.widthMeta ? Number(node.widthMeta.value) : null,
     heightCm: node.heightMeta ? Number(node.heightMeta.value) : null,
     depthCm: node.depthMeta ? Number(node.depthMeta.value) : null,
+    modelUrl: findModelUrl(node.media),
   }));
 }
-
 
 // --- Cart / checkout ---
 //

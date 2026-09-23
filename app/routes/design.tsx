@@ -1,16 +1,16 @@
 // The real 2D floor planner. It shows:
 //  - a sidebar of real furniture pulled live from Shopify (via the
 //    loader below, which runs on the server before the page renders)
-//  - a top-down "canvas" scaled to the room's real dimensions
+//  - a top-down "canvas" scaled to the room's real shape - which can now
+//    be ANY polygon (an L-shape, an alcove, angled walls), not just a
+//    plain rectangle
 //  - drag-and-drop: drag a product from the sidebar and drop it onto
 //    the canvas to place it; drag a placed item to reposition it
 //
-// The scaling idea: we don't draw the room at its real size in pixels
-// (a 400cm room would need a 400px+ canvas at 1px/cm, which is fine,
-// but a large room could get huge or tiny). Instead we compute a
-// "pixels per cm" scale factor so the room always fits nicely on
-// screen, then every item's pixel size and position is derived from
-// that same scale - keeping everything proportionally correct.
+// The scaling idea: we don't draw the room at its real size in pixels.
+// Instead we compute a "pixels per cm" scale factor, based on the
+// smallest rectangle that fully contains the room's shape, so the room
+// always fits nicely on screen no matter how big or small it really is.
 //
 // Styling note: most of this file uses Tailwind utility classes for
 // anything that's the SAME every time (colors, spacing, fonts). A few
@@ -34,6 +34,11 @@ import {
 } from "~/lib/shopify.server";
 import { StepNav } from "~/components/StepNav";
 import { useRoomStore, type PlacedItem } from "~/store/roomStore";
+import {
+  getEffectiveFootprint,
+  getPolygonBounds,
+  isPointInPolygon,
+} from "~/lib/geometry";
 import type { Route } from "./+types/design";
 
 const MAX_CANVAS_PX = 640;
@@ -81,21 +86,27 @@ export async function action({ request }: Route.ActionArgs) {
 export default function Design({ loaderData }: Route.ComponentProps) {
   const { products } = loaderData;
 
-  const dimensions = useRoomStore((state) => state.dimensions);
+  const shape = useRoomStore((state) => state.shape);
   const wallColor = useRoomStore((state) => state.wallColor);
   const floorColor = useRoomStore((state) => state.floorColor);
   const placedItems = useRoomStore((state) => state.placedItems);
   const addItem = useRoomStore((state) => state.addItem);
   const updateItemPosition = useRoomStore((state) => state.updateItemPosition);
+  const updateItemPlacement = useRoomStore((state) => state.updateItemPlacement);
 
   const canvasRef = useRef<HTMLDivElement | null>(null);
 
-  // pixels-per-centimeter, chosen so the longer side of the room maps
-  // to MAX_CANVAS_PX on screen
-  const scale =
-    MAX_CANVAS_PX / Math.max(dimensions.widthCm, dimensions.lengthCm);
-  const canvasWidthPx = dimensions.widthCm * scale;
-  const canvasHeightPx = dimensions.lengthCm * scale;
+  // The room can be any shape now, so there's no single "width" and
+  // "length" anymore - instead we find the smallest rectangle that
+  // fully contains the shape, and scale/position everything relative
+  // to THAT rectangle's top-left corner.
+  const bounds = getPolygonBounds(shape.points);
+  const roomWidthCm = bounds.maxX - bounds.minX;
+  const roomDepthCm = bounds.maxZ - bounds.minZ;
+
+  const scale = MAX_CANVAS_PX / Math.max(roomWidthCm, roomDepthCm);
+  const canvasWidthPx = roomWidthCm * scale;
+  const canvasHeightPx = roomDepthCm * scale;
 
   const cartTotal = placedItems.reduce(
     (sum, item) => sum + Number(item.price),
@@ -119,7 +130,7 @@ export default function Design({ loaderData }: Route.ComponentProps) {
     const finalClientX = activatorEvent.clientX + event.delta.x;
     const finalClientY = activatorEvent.clientY + event.delta.y;
 
-    // Convert from "pixels on screen" to "centimeters inside the room"
+    // Position relative to the canvas's top-left corner, in cm
     const dropXCm = (finalClientX - canvasRect.left) / scale;
     const dropZCm = (finalClientY - canvasRect.top) / scale;
 
@@ -135,6 +146,25 @@ export default function Design({ loaderData }: Route.ComponentProps) {
       const depthCm = product.depthCm ?? 60;
       const heightCm = product.heightCm ?? 80;
 
+      const position = {
+        x: clamp(dropXCm - widthCm / 2, 0, roomWidthCm - widthCm),
+        y: 0,
+        z: clamp(dropZCm - depthCm / 2, 0, roomDepthCm - depthCm),
+      };
+
+      // The canvas is scaled to the room's BOUNDING BOX, but the room's
+      // actual shape can be smaller than that box (think of an L-shape:
+      // its bounding box is a full rectangle, but the missing corner
+      // isn't really part of the room). So before placing anything, we
+      // check the item's center point against the real polygon, not
+      // just the rectangle - this is exactly why non-rectangular rooms
+      // need real point-in-polygon math, not just min/max clamping.
+      const centerInRoomCoords = {
+        x: bounds.minX + position.x + widthCm / 2,
+        z: bounds.minZ + position.z + depthCm / 2,
+      };
+      if (!isPointInPolygon(centerInRoomCoords, shape.points)) return;
+
       addItem({
         id: crypto.randomUUID(),
         productId: product.id,
@@ -143,14 +173,11 @@ export default function Design({ loaderData }: Route.ComponentProps) {
         price: product.price,
         currencyCode: product.currencyCode,
         imageUrl: product.imageUrl,
+        modelUrl: product.modelUrl,
         widthCm,
         heightCm,
         depthCm,
-        position: {
-          x: clamp(dropXCm - widthCm / 2, 0, dimensions.widthCm - widthCm),
-          y: 0,
-          z: clamp(dropZCm - depthCm / 2, 0, dimensions.lengthCm - depthCm),
-        },
+        position,
         rotationY: 0,
       });
     } else if (activeId.startsWith("placed-")) {
@@ -159,20 +186,59 @@ export default function Design({ loaderData }: Route.ComponentProps) {
       const item = placedItems.find((i) => i.id === itemId);
       if (!item) return;
 
-      updateItemPosition(itemId, {
-        x: clamp(
-          dropXCm - item.widthCm / 2,
-          0,
-          dimensions.widthCm - item.widthCm
-        ),
+      // Use the item's CURRENT rotation to know its real on-the-ground
+      // footprint right now - a sofa rotated 90 degrees needs its
+      // swapped width/depth here, not its original ones.
+      const footprint = getEffectiveFootprint(
+        item.widthCm,
+        item.depthCm,
+        item.rotationY
+      );
+
+      const position = {
+        x: clamp(dropXCm - footprint.width / 2, 0, roomWidthCm - footprint.width),
         y: 0,
-        z: clamp(
-          dropZCm - item.depthCm / 2,
-          0,
-          dimensions.lengthCm - item.depthCm
-        ),
-      });
+        z: clamp(dropZCm - footprint.depth / 2, 0, roomDepthCm - footprint.depth),
+      };
+
+      const centerInRoomCoords = {
+        x: bounds.minX + position.x + footprint.width / 2,
+        z: bounds.minZ + position.z + footprint.depth / 2,
+      };
+      if (!isPointInPolygon(centerInRoomCoords, shape.points)) return;
+
+      updateItemPosition(itemId, position);
     }
+  }
+
+  // Rotates an item to any angle the user drags it to (see the rotate
+  // handle in PlacedFurniture, which calls this continuously while
+  // dragging). We keep the item's CENTER fixed rather than its
+  // top-left corner - otherwise the item would visibly drift sideways
+  // as it turns, since a rotated rectangle's bounding box keeps
+  // changing size and "top-left corner" doesn't point at a stable spot.
+  function handleRotate(item: PlacedItem, nextRotationY: number) {
+    const currentFootprint = getEffectiveFootprint(
+      item.widthCm,
+      item.depthCm,
+      item.rotationY
+    );
+    const centerX = item.position.x + currentFootprint.width / 2;
+    const centerZ = item.position.z + currentFootprint.depth / 2;
+
+    const nextFootprint = getEffectiveFootprint(
+      item.widthCm,
+      item.depthCm,
+      nextRotationY
+    );
+
+    const position = {
+      x: clamp(centerX - nextFootprint.width / 2, 0, roomWidthCm - nextFootprint.width),
+      y: 0,
+      z: clamp(centerZ - nextFootprint.depth / 2, 0, roomDepthCm - nextFootprint.depth),
+    };
+
+    updateItemPlacement(item.id, position, nextRotationY);
   }
 
   return (
@@ -205,8 +271,8 @@ export default function Design({ loaderData }: Route.ComponentProps) {
           {/* The room itself, drawn top-down and scaled to real size */}
           <div className="flex-1">
             <p className="mb-2 text-xs text-stone-500 dark:text-stone-400">
-              {dimensions.widthCm}cm × {dimensions.lengthCm}cm room (top-down
-              view)
+              {shape.points.length}-corner room, {Math.round(roomWidthCm)}cm ×{" "}
+              {Math.round(roomDepthCm)}cm (top-down view)
             </p>
             <RoomCanvas
               canvasRef={canvasRef}
@@ -214,9 +280,17 @@ export default function Design({ loaderData }: Route.ComponentProps) {
               heightPx={canvasHeightPx}
               wallColor={wallColor}
               floorColor={floorColor}
+              points={shape.points}
+              bounds={bounds}
+              scale={scale}
             >
               {placedItems.map((item) => (
-                <PlacedFurniture key={item.id} item={item} scale={scale} />
+                <PlacedFurniture
+                  key={item.id}
+                  item={item}
+                  scale={scale}
+                  onRotate={handleRotate}
+                />
               ))}
             </RoomCanvas>
           </div>
@@ -319,25 +393,105 @@ function SidebarProduct({ product }: { product: ShopifyProduct }) {
   );
 }
 
-function PlacedFurniture({ item, scale }: { item: PlacedItem; scale: number }) {
+function PlacedFurniture({
+  item,
+  scale,
+  onRotate,
+}: {
+  item: PlacedItem;
+  scale: number;
+  onRotate: (item: PlacedItem, rotationY: number) => void;
+}) {
   const { attributes, listeners, setNodeRef, transform, isDragging } =
     useDraggable({ id: `placed-${item.id}` });
   const removeItem = useRoomStore((state) => state.removeItem);
 
+  // We need this element's own on-screen position (to turn future
+  // pointer coordinates into an angle around its center) alongside
+  // dnd-kit's own ref - a callback ref below sets both.
+  const elementRef = useRef<HTMLDivElement | null>(null);
+
+  // The item's on-the-ground bounding box (used for room-boundary
+  // clamping up in the parent, and to know where its CENTER sits) is
+  // generally bigger than its true, unrotated size once it's turned to
+  // an angle. So the div itself is sized at the item's true width/depth,
+  // centered on that same point, and then visually turned with a CSS
+  // rotation - that's what makes rotation look correct at ANY angle,
+  // not just the 90-degree steps where a resized box used to happen to
+  // look identical to a real rotation.
+  const footprint = getEffectiveFootprint(
+    item.widthCm,
+    item.depthCm,
+    item.rotationY
+  );
+  const centerXCm = item.position.x + footprint.width / 2;
+  const centerZCm = item.position.z + footprint.depth / 2;
+  const widthPx = item.widthCm * scale;
+  const depthPx = item.depthCm * scale;
+  const leftPx = centerXCm * scale - widthPx / 2;
+  const topPx = centerZCm * scale - depthPx / 2;
+
+  // Dragging the rotate handle turns the item to follow the pointer,
+  // freely - any angle, not locked to 90-degree steps. We measure the
+  // angle from the item's on-screen center (captured once, when the
+  // drag starts - the center doesn't move while only the rotation is
+  // changing) to wherever the pointer currently is.
+  function handleRotateStart(e: React.PointerEvent) {
+    const el = elementRef.current;
+    if (!el) return;
+
+    const rect = el.getBoundingClientRect();
+    const centerX = rect.left + rect.width / 2;
+    const centerY = rect.top + rect.height / 2;
+
+    function angleTo(clientX: number, clientY: number) {
+      // atan2 measures from the positive X axis, so pointing straight
+      // right is 0 degrees - we add 90 so that pointing straight UP
+      // (the item's default facing) is 0 degrees instead, then wrap
+      // into a plain 0-359 range.
+      const degrees =
+        (Math.atan2(clientY - centerY, clientX - centerX) * 180) / Math.PI +
+        90;
+      return ((degrees % 360) + 360) % 360;
+    }
+
+    function onMove(ev: PointerEvent) {
+      onRotate(item, angleTo(ev.clientX, ev.clientY));
+    }
+    function onUp() {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    }
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  }
+
   return (
     <div
-      ref={setNodeRef}
+      ref={(node) => {
+        setNodeRef(node);
+        elementRef.current = node;
+      }}
       {...listeners}
       {...attributes}
       title={item.title}
       style={{
-        left: item.position.x * scale,
-        top: item.position.z * scale,
-        width: item.widthCm * scale,
-        height: item.depthCm * scale,
-        transform: transform
-          ? `translate3d(${transform.x}px, ${transform.y}px, 0)`
-          : undefined,
+        left: leftPx,
+        top: topPx,
+        width: widthPx,
+        height: depthPx,
+        // Order matters: translate3d (dnd-kit's screen-space drag
+        // offset) has to come BEFORE rotate, otherwise the rotation
+        // would happen first and dragging would move the item along
+        // its own tilted axes instead of following the pointer.
+        transform: [
+          transform
+            ? `translate3d(${transform.x}px, ${transform.y}px, 0)`
+            : undefined,
+          `rotate(${item.rotationY}deg)`,
+        ]
+          .filter(Boolean)
+          .join(" "),
         opacity: isDragging ? 0.6 : 1,
         touchAction: "none",
       }}
@@ -346,7 +500,11 @@ function PlacedFurniture({ item, scale }: { item: PlacedItem; scale: number }) {
       // well, and just looks like a white square at small sizes. Floor
       // planners (IKEA's, etc.) use flat colored shapes here instead,
       // and save real photos for the sidebar and the 3D view.
-      className="absolute flex cursor-grab items-center justify-center overflow-hidden rounded-md border-2 border-amber-800/40 bg-amber-200/70 text-center dark:bg-amber-900/40"
+      //
+      // No overflow-hidden here anymore - the remove/rotate buttons
+      // below sit just outside this box's edges on purpose, and
+      // clipping was cutting them off.
+      className="absolute flex cursor-grab items-center justify-center rounded-md border-2 border-amber-800/40 bg-amber-200/70 text-center dark:bg-amber-900/40"
     >
       <button
         // dnd-kit's drag listeners are attached to this whole block, and
@@ -360,9 +518,24 @@ function PlacedFurniture({ item, scale }: { item: PlacedItem; scale: number }) {
           e.stopPropagation();
           removeItem(item.id);
         }}
-        className="absolute -top-2 -right-2 z-10 flex h-4.5 w-4.5 items-center justify-center rounded-full bg-red-600 text-xs leading-none text-white hover:bg-red-700"
+        title="Remove"
+        className="absolute -top-3 -right-3 z-10 flex h-6 w-6 items-center justify-center rounded-full bg-red-600 text-sm leading-none text-white shadow hover:bg-red-700"
       >
         ×
+      </button>
+      <button
+        // Rotation now happens by dragging this handle around rather
+        // than clicking it - pointerdown starts tracking the drag (see
+        // handleRotateStart), and stopPropagation keeps dnd-kit's own
+        // drag detection from swallowing the press.
+        onPointerDown={(e) => {
+          e.stopPropagation();
+          handleRotateStart(e);
+        }}
+        title="Drag to rotate"
+        className="absolute -top-3 -left-3 z-10 flex h-6 w-6 cursor-grab items-center justify-center rounded-full bg-stone-700 text-sm leading-none text-white shadow hover:bg-stone-800 active:cursor-grabbing"
+      >
+        ⟳
       </button>
       <span className="px-1 text-[10px] font-medium text-amber-950 dark:text-amber-100">
         {item.title}
@@ -377,6 +550,9 @@ function RoomCanvas({
   heightPx,
   wallColor,
   floorColor,
+  points,
+  bounds,
+  scale,
   children,
 }: {
   canvasRef: React.RefObject<HTMLDivElement | null>;
@@ -384,9 +560,20 @@ function RoomCanvas({
   heightPx: number;
   wallColor: string;
   floorColor: string;
+  points: Array<{ x: number; z: number }>;
+  bounds: { minX: number; minZ: number };
+  scale: number;
   children: React.ReactNode;
 }) {
   const { setNodeRef } = useDroppable({ id: "room-canvas" });
+
+  // The room's shape is drawn as an SVG polygon, positioned relative to
+  // the bounding box's top-left corner (so the shape sits flush inside
+  // the canvas regardless of where its original coordinates were drawn
+  // on the room-setup screen).
+  const polygonPoints = points
+    .map((p) => `${(p.x - bounds.minX) * scale},${(p.z - bounds.minZ) * scale}`)
+    .join(" ");
 
   return (
     <div
@@ -394,15 +581,23 @@ function RoomCanvas({
         setNodeRef(node);
         canvasRef.current = node;
       }}
-      style={{
-        width: widthPx,
-        height: heightPx,
-        background: floorColor,
-        border: `12px solid ${wallColor}`,
-      }}
-      className="relative rounded-sm shadow-inner"
+      style={{ width: widthPx, height: heightPx }}
+      className="relative"
     >
-      {children}
+      <svg
+        width={widthPx}
+        height={heightPx}
+        className="absolute inset-0 rounded-sm shadow-inner"
+      >
+        <polygon
+          points={polygonPoints}
+          fill={floorColor}
+          stroke={wallColor}
+          strokeWidth={12}
+          strokeLinejoin="round"
+        />
+      </svg>
+      <div className="absolute inset-0">{children}</div>
     </div>
   );
 }
