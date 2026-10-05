@@ -431,6 +431,17 @@ function PlacedFurniture({
   const leftPx = centerXCm * scale - widthPx / 2;
   const topPx = centerZCm * scale - depthPx / 2;
 
+  // Sizes the name label to fit inside THIS item's box. The font shrinks
+  // for small items (and never goes below 7px or above 11px), and the
+  // label is allowed only as many lines as actually fit the box's height -
+  // anything longer is cut off with "..." rather than spilling outside
+  // the box. The full name is still shown on hover (the box's title).
+  const labelFontPx = clamp(Math.min(widthPx, depthPx) / 6, 7, 11);
+  const maxLabelLines = Math.max(
+    1,
+    Math.floor((depthPx - 8) / (labelFontPx * 1.25))
+  );
+
   // Dragging the rotate handle turns the item to follow the pointer,
   // freely - any angle, not locked to 90-degree steps. We measure the
   // angle from the item's on-screen center (captured once, when the
@@ -537,7 +548,20 @@ function PlacedFurniture({
       >
         ⟳
       </button>
-      <span className="px-1 text-[10px] font-medium text-amber-950 dark:text-amber-100">
+      <span
+        // min-w-0 + max-w-full let this flex child shrink to the box's
+        // width so long names wrap instead of running past the edges.
+        // The -webkit-box / line-clamp combo is the standard way to cut
+        // text off with "..." after a set number of lines.
+        className="min-w-0 max-w-full overflow-hidden px-1 text-center leading-tight font-medium text-amber-950 dark:text-amber-100"
+        style={{
+          fontSize: labelFontPx,
+          display: "-webkit-box",
+          WebkitBoxOrient: "vertical",
+          WebkitLineClamp: maxLabelLines,
+          overflowWrap: "anywhere",
+        }}
+      >
         {item.title}
       </span>
     </div>
