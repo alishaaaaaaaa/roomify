@@ -302,6 +302,12 @@ export type WallSegment = {
   edgeMidX: number;
   edgeMidZ: number;
   edgeLength: number;
+  // Which edge of the outline this wall stands on
+  edgeIndex: number;
+  // How far (along the wall's direction) the slab's middle is from the
+  // edge's start corner - lets callers place things by distance from
+  // that corner: x_in_slab = distanceFromCorner - alongOffset
+  alongOffset: number;
 };
 
 // Builds one wall slab per edge of the room's outline. Each slab sits
@@ -372,6 +378,8 @@ export function getWallSegments(points: RoomPoint[], thickness: number): WallSeg
       edgeMidX: (a.x + b.x) / 2,
       edgeMidZ: (a.z + b.z) / 2,
       edgeLength,
+      edgeIndex: i,
+      alongOffset: along,
     });
   }
   return segments;

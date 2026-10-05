@@ -16,6 +16,16 @@ import { useRoomStore } from "~/store/roomStore";
 import type { RoomPoint } from "~/lib/geometry";
 import { ROOM_PRESETS, WALL_COLORS } from "~/lib/presets";
 import {
+  DOOR_COLOR,
+  OPENING_DEFAULTS,
+  WINDOW_COLOR,
+  edgeLength,
+  getOpeningLine,
+  sanitizeOpenings,
+  type Opening,
+  type OpeningType,
+} from "~/lib/openings";
+import {
   FLOORING_OPTIONS,
   getFloorOption,
   type FloorGroup,
@@ -54,6 +64,35 @@ export default function RoomSetup() {
   const setFloorType = useRoomStore((state) => state.setFloorType);
   const setFloorColor = useRoomStore((state) => state.setFloorColor);
   const applyPreset = useRoomStore((state) => state.applyPreset);
+  const openings = useRoomStore((state) => state.openings);
+  const addOpening = useRoomStore((state) => state.addOpening);
+  const updateOpening = useRoomStore((state) => state.updateOpening);
+  const removeOpening = useRoomStore((state) => state.removeOpening);
+
+  // Only openings that still fit the current outline are shown/drawn
+  const validOpenings = sanitizeOpenings(shape.points, openings, shape.heightCm);
+
+  // The list shows what was typed as-is (so typing isn't fought by
+  // clamping); only walls that still exist are listed.
+  const listedOpenings = openings.filter(
+    (o) => o.edgeIndex >= 0 && o.edgeIndex < shape.points.length
+  );
+
+  function handleAddOpening(type: OpeningType) {
+    if (shape.points.length < 3) return;
+    // Put it on the longest wall, in the middle
+    let best = 0;
+    for (let i = 1; i < shape.points.length; i++) {
+      if (edgeLength(shape.points, i) > edgeLength(shape.points, best)) best = i;
+    }
+    addOpening({
+      id: crypto.randomUUID(),
+      type,
+      edgeIndex: best,
+      centerCm: edgeLength(shape.points, best) / 2,
+      ...OPENING_DEFAULTS[type],
+    });
+  }
 
   // The room preview is filled with the chosen flooring, drawn to the
   // same scale as the grid (so a 60cm tile looks 60cm wide).
@@ -184,6 +223,24 @@ export default function RoomSetup() {
                   />
                 ))}
 
+              {/* Doors (brown) and windows (blue) drawn on their walls */}
+              {isClosed &&
+                validOpenings.map((o) => {
+                  const line = getOpeningLine(shape.points, o);
+                  return (
+                    <line
+                      key={o.id}
+                      x1={line.x1 * SCALE}
+                      y1={line.z1 * SCALE}
+                      x2={line.x2 * SCALE}
+                      y2={line.z2 * SCALE}
+                      stroke={o.type === "door" ? DOOR_COLOR : WINDOW_COLOR}
+                      strokeWidth={10}
+                      strokeLinecap="butt"
+                    />
+                  );
+                })}
+
               {/* One draggable (once closed) or plain (while drawing)
                   handle per corner */}
               {shape.points.map((point, index) => (
@@ -287,7 +344,13 @@ export default function RoomSetup() {
                     key={preset.id}
                     type="button"
                     onClick={() => {
-                      applyPreset(preset);
+                      applyPreset({
+                        ...preset,
+                        openings: preset.openings.map((o) => ({
+                          ...o,
+                          id: crypto.randomUUID(),
+                        })),
+                      });
                       setIsClosed(true);
                     }}
                     className="rounded-lg border border-stone-200 p-2 text-left hover:border-stone-400 dark:border-stone-700 dark:hover:border-stone-500"
@@ -347,6 +410,47 @@ export default function RoomSetup() {
 
             <div className="rounded-2xl border border-stone-200 bg-white p-4 shadow-sm dark:border-stone-800 dark:bg-stone-900">
               <h2 className="text-xs font-semibold text-stone-500 dark:text-stone-400">
+                Doors &amp; windows
+              </h2>
+              <div className="mt-2 flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => handleAddOpening("door")}
+                  disabled={!isClosed}
+                  className="rounded-full border border-stone-300 px-3 py-1 text-xs font-medium text-stone-700 hover:bg-stone-100 disabled:opacity-40 dark:border-stone-700 dark:text-stone-200 dark:hover:bg-stone-800"
+                >
+                  + Door
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleAddOpening("window")}
+                  disabled={!isClosed}
+                  className="rounded-full border border-stone-300 px-3 py-1 text-xs font-medium text-stone-700 hover:bg-stone-100 disabled:opacity-40 dark:border-stone-700 dark:text-stone-200 dark:hover:bg-stone-800"
+                >
+                  + Window
+                </button>
+              </div>
+              {listedOpenings.length === 0 && (
+                <p className="mt-2 text-xs text-stone-500 dark:text-stone-400">
+                  None yet. Doors show brown and windows blue on the plan.
+                </p>
+              )}
+              <div className="mt-3 space-y-3">
+                {listedOpenings.map((o) => (
+                  <OpeningRow
+                    key={o.id}
+                    opening={o}
+                    wallCount={shape.points.length}
+                    wallLengths={shape.points.map((_, i) => edgeLength(shape.points, i))}
+                    onChange={(patch) => updateOpening(o.id, patch)}
+                    onRemove={() => removeOpening(o.id)}
+                  />
+                ))}
+              </div>
+            </div>
+
+            <div className="rounded-2xl border border-stone-200 bg-white p-4 shadow-sm dark:border-stone-800 dark:bg-stone-900">
+              <h2 className="text-xs font-semibold text-stone-500 dark:text-stone-400">
                 Flooring
               </h2>
               <p className="mt-1 text-xs text-stone-500 dark:text-stone-400">
@@ -376,6 +480,99 @@ export default function RoomSetup() {
           </div>
         </div>
       </main>
+    </div>
+  );
+}
+
+function OpeningRow({
+  opening,
+  wallCount,
+  wallLengths,
+  onChange,
+  onRemove,
+}: {
+  opening: Opening;
+  wallCount: number;
+  wallLengths: number[];
+  onChange: (patch: Partial<Omit<Opening, "id">>) => void;
+  onRemove: () => void;
+}) {
+  const inputClass =
+    "mt-0.5 w-full rounded-md border border-stone-300 bg-white px-2 py-1 text-xs dark:border-stone-700 dark:bg-stone-800";
+  return (
+    <div className="rounded-lg border border-stone-200 p-2 dark:border-stone-700">
+      <div className="flex items-center justify-between">
+        <span className="flex items-center gap-1.5 text-xs font-medium text-stone-900 dark:text-stone-100">
+          <span
+            className="inline-block h-2.5 w-2.5 rounded-sm"
+            style={{
+              backgroundColor: opening.type === "door" ? DOOR_COLOR : WINDOW_COLOR,
+            }}
+          />
+          {opening.type === "door" ? "Door" : "Window"}
+        </span>
+        <button
+          type="button"
+          onClick={onRemove}
+          className="text-xs text-red-600 hover:underline"
+        >
+          Remove
+        </button>
+      </div>
+      <div className="mt-2 grid grid-cols-2 gap-2">
+        <label className="col-span-2 text-[11px] text-stone-500 dark:text-stone-400">
+          Wall
+          <select
+            value={opening.edgeIndex}
+            onChange={(e) => onChange({ edgeIndex: Number(e.target.value) })}
+            className={inputClass}
+          >
+            {Array.from({ length: wallCount }, (_, i) => (
+              <option key={i} value={i}>
+                Wall {i + 1} ({Math.round(wallLengths[i])} cm)
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="text-[11px] text-stone-500 dark:text-stone-400">
+          Position (cm)
+          <input
+            type="number"
+            value={Math.round(opening.centerCm)}
+            onChange={(e) => onChange({ centerCm: Number(e.target.value) })}
+            className={inputClass}
+          />
+        </label>
+        <label className="text-[11px] text-stone-500 dark:text-stone-400">
+          Width (cm)
+          <input
+            type="number"
+            value={Math.round(opening.widthCm)}
+            onChange={(e) => onChange({ widthCm: Number(e.target.value) })}
+            className={inputClass}
+          />
+        </label>
+        <label className="text-[11px] text-stone-500 dark:text-stone-400">
+          Height (cm)
+          <input
+            type="number"
+            value={Math.round(opening.heightCm)}
+            onChange={(e) => onChange({ heightCm: Number(e.target.value) })}
+            className={inputClass}
+          />
+        </label>
+        {opening.type === "window" && (
+          <label className="text-[11px] text-stone-500 dark:text-stone-400">
+            Sill height (cm)
+            <input
+              type="number"
+              value={Math.round(opening.sillCm)}
+              onChange={(e) => onChange({ sillCm: Number(e.target.value) })}
+              className={inputClass}
+            />
+          </label>
+        )}
+      </div>
     </div>
   );
 }

@@ -45,6 +45,14 @@ import {
 } from "~/lib/geometry";
 import { FloorPatternDefs, useFloorPaint } from "~/components/FloorPattern";
 import type { FloorId } from "~/lib/flooring";
+import {
+  DOOR_COLOR,
+  WINDOW_COLOR,
+  getOpeningLine,
+  sanitizeOpenings,
+  type Opening,
+} from "~/lib/openings";
+import { SHARE_HASH_KEY, decodeRoom, encodeRoom } from "~/lib/share";
 import type { Route } from "./+types/design";
 
 const MAX_CANVAS_PX = 640;
@@ -116,6 +124,8 @@ export default function Design({ loaderData }: Route.ComponentProps) {
   const canUndo = useRoomStore((state) => state.past.length > 0);
   const canRedo = useRoomStore((state) => state.future.length > 0);
   const placedItems = useRoomStore((state) => state.placedItems);
+  const openings = useRoomStore((state) => state.openings);
+  const loadRoom = useRoomStore((state) => state.loadRoom);
   const addItem = useRoomStore((state) => state.addItem);
   const updateItemPosition = useRoomStore((state) => state.updateItemPosition);
   const updateItemPlacement = useRoomStore((state) => state.updateItemPlacement);
@@ -139,6 +149,93 @@ export default function Design({ loaderData }: Route.ComponentProps) {
     noticeTimer.current = window.setTimeout(() => setNotice(null), 2500);
   }
   useEffect(() => () => window.clearTimeout(noticeTimer.current), []);
+
+  // Opening a share link (…/design#room=…) loads that room. Runs once
+  // the visitor's own saved room has loaded, so it replaces it cleanly -
+  // asking first if they'd be losing furniture they placed.
+  useEffect(() => {
+    if (!hasHydrated) return;
+    const hash = window.location.hash.replace(/^#/, "");
+    const params = new URLSearchParams(hash);
+    const encoded = params.get(SHARE_HASH_KEY);
+    if (!encoded) return;
+
+    // Clear the link first so a refresh doesn't ask again
+    history.replaceState(null, "", window.location.pathname + window.location.search);
+
+    const decoded = decodeRoom(encoded);
+    if (!decoded) {
+      showNotice("That share link looks damaged, so it couldn't be opened.");
+      return;
+    }
+    const current = useRoomStore.getState().placedItems;
+    if (
+      current.length > 0 &&
+      !window.confirm(
+        "Open the shared room? It will replace the room you're working on."
+      )
+    ) {
+      return;
+    }
+
+    const items: PlacedItem[] = [];
+    let missing = 0;
+    for (const it of decoded.items) {
+      const product = products.find((p) => p.id === it.productId);
+      if (!product) {
+        missing++;
+        continue;
+      }
+      items.push({
+        id: crypto.randomUUID(),
+        productId: product.id,
+        variantId: product.variantId,
+        title: product.title,
+        price: product.price,
+        currencyCode: product.currencyCode,
+        imageUrl: product.imageUrl,
+        modelUrl: product.modelUrl,
+        widthCm: product.widthCm ?? 60,
+        heightCm: product.heightCm ?? 80,
+        depthCm: product.depthCm ?? 60,
+        position: { x: it.x, y: 0, z: it.z },
+        rotationY: it.rotationY,
+      });
+    }
+    loadRoom({
+      shape: decoded.shape,
+      wallColor: decoded.wallColor,
+      floorType: decoded.floorType,
+      floorColor: decoded.floorColor,
+      openings: decoded.openings,
+      placedItems: items,
+    });
+    showNotice(
+      missing > 0
+        ? `Shared room opened (${missing} item(s) are no longer in the store).`
+        : "Shared room opened."
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hasHydrated]);
+
+  async function handleShare() {
+    const encoded = encodeRoom({
+      shape,
+      wallColor,
+      floorType,
+      floorColor,
+      openings,
+      placedItems,
+    });
+    const url = `${window.location.origin}/design#${SHARE_HASH_KEY}=${encoded}`;
+    try {
+      await navigator.clipboard.writeText(url);
+      showNotice("Share link copied!");
+    } catch {
+      // Clipboard can be blocked (e.g. on plain http) - let them copy it
+      window.prompt("Copy this link to share your room:", url);
+    }
+  }
 
   // Ctrl/Cmd+Z = undo, Ctrl/Cmd+Shift+Z or Ctrl+Y = redo. Ignored while
   // typing in a text field.
@@ -535,6 +632,7 @@ export default function Design({ loaderData }: Route.ComponentProps) {
               floorColor={floorColor}
               floorType={floorType}
               guides={guides}
+              openings={sanitizeOpenings(shape.points, openings, shape.heightCm)}
               points={shape.points}
               bounds={bounds}
               scale={scale}
@@ -566,6 +664,13 @@ export default function Design({ loaderData }: Route.ComponentProps) {
                 </span>
               </p>
 
+              <button
+                type="button"
+                onClick={handleShare}
+                className="mt-2 block text-xs font-medium text-stone-500 underline hover:text-stone-900 dark:text-stone-400 dark:hover:text-stone-100"
+              >
+                Copy share link
+              </button>
               {placedItems.length > 0 && (
                 <button
                   type="button"
@@ -856,6 +961,7 @@ function RoomCanvas({
   floorColor,
   floorType,
   guides,
+  openings,
   points,
   bounds,
   scale,
@@ -868,6 +974,7 @@ function RoomCanvas({
   floorColor: string;
   floorType: FloorId;
   guides: { x: number | null; z: number | null };
+  openings: Opening[];
   points: Array<{ x: number; z: number }>;
   bounds: { minX: number; minZ: number };
   scale: number;
@@ -910,6 +1017,21 @@ function RoomCanvas({
           strokeWidth={12}
           strokeLinejoin="round"
         />
+        {/* Doors (brown) and windows (blue), drawn over their walls */}
+        {openings.map((o) => {
+          const line = getOpeningLine(points, o);
+          return (
+            <line
+              key={o.id}
+              x1={(line.x1 - bounds.minX) * scale}
+              y1={(line.z1 - bounds.minZ) * scale}
+              x2={(line.x2 - bounds.minX) * scale}
+              y2={(line.z2 - bounds.minZ) * scale}
+              stroke={o.type === "door" ? DOOR_COLOR : WINDOW_COLOR}
+              strokeWidth={12}
+            />
+          );
+        })}
       </svg>
       <div className="absolute inset-0">{children}</div>
       {/* Alignment guides (only while dragging, when something lines up) */}

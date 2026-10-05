@@ -12,6 +12,7 @@
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
 import type { RoomPoint } from "~/lib/geometry";
+import type { Opening } from "~/lib/openings";
 import { DEFAULT_FLOOR_ID, isFloorId, type FloorId } from "~/lib/flooring";
 
 export type RoomShape = {
@@ -68,6 +69,7 @@ type RoomState = {
   floorType: FloorId;
   floorColor: string;
   placedItems: PlacedItem[];
+  openings: Opening[];
   // True once saved data has been loaded from the browser. Not saved.
   hasHydrated: boolean;
   // Undo/redo for furniture changes. Each entry is a full copy of the
@@ -97,8 +99,21 @@ type RoomState = {
     shape: RoomShape;
     wallColor: string;
     floorType: FloorId;
+    openings: Opening[];
   }) => void;
   syncWithCatalog: (catalog: ReadonlyArray<CatalogProduct>) => void;
+  addOpening: (opening: Opening) => void;
+  updateOpening: (id: string, patch: Partial<Omit<Opening, "id">>) => void;
+  removeOpening: (id: string) => void;
+  // Replaces the whole room (used when opening a shared link)
+  loadRoom: (room: {
+    shape: RoomShape;
+    wallColor: string;
+    floorType: FloorId;
+    floorColor: string;
+    openings: Opening[];
+    placedItems: PlacedItem[];
+  }) => void;
   setHasHydrated: (value: boolean) => void;
 };
 
@@ -132,6 +147,7 @@ export const useRoomStore = create<RoomState>()(
       floorType: DEFAULT_FLOOR_ID,
       floorColor: "#c9a876",
       placedItems: [],
+      openings: [],
       hasHydrated: false,
       past: [],
       future: [],
@@ -213,6 +229,7 @@ export const useRoomStore = create<RoomState>()(
           shape: preset.shape,
           wallColor: preset.wallColor,
           floorType: preset.floorType,
+          openings: preset.openings,
           placedItems: [],
           past: state.placedItems.length ? [...state.past, state.placedItems] : state.past,
           future: [],
@@ -254,6 +271,26 @@ export const useRoomStore = create<RoomState>()(
           return changed ? { placedItems } : state;
         }),
 
+      addOpening: (opening) =>
+        set((state) => ({ openings: [...state.openings, opening] })),
+      updateOpening: (id, patch) =>
+        set((state) => ({
+          openings: state.openings.map((o) =>
+            o.id === id ? { ...o, ...patch } : o
+          ),
+        })),
+      removeOpening: (id) =>
+        set((state) => ({
+          openings: state.openings.filter((o) => o.id !== id),
+        })),
+
+      loadRoom: (room) =>
+        set(() => ({
+          ...room,
+          past: [],
+          future: [],
+        })),
+
       setHasHydrated: (hasHydrated) => set({ hasHydrated }),
     }),
     {
@@ -276,6 +313,7 @@ export const useRoomStore = create<RoomState>()(
         floorType: state.floorType,
         floorColor: state.floorColor,
         placedItems: state.placedItems,
+        openings: state.openings,
       }),
 
       // How saved data is combined with the defaults when loading.
@@ -298,6 +336,9 @@ export const useRoomStore = create<RoomState>()(
           placedItems: Array.isArray(saved.placedItems)
             ? saved.placedItems
             : current.placedItems,
+          openings: Array.isArray(saved.openings)
+            ? saved.openings
+            : current.openings,
         };
       },
 

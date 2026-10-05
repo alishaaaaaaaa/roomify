@@ -26,6 +26,7 @@ import { Component, Suspense, useEffect, useMemo, useRef, useState } from "react
 import type { ReactNode } from "react";
 import { Link } from "react-router";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
+import type { RefObject } from "react";
 import {
   Environment,
   Lightformer,
@@ -38,6 +39,7 @@ import {
   CanvasTexture,
   DoubleSide,
   MathUtils,
+  Group,
   Mesh,
   MeshStandardMaterial,
   RepeatWrapping,
@@ -48,10 +50,12 @@ import {
 import { StepNav } from "~/components/StepNav";
 import { useRoomStore, type PlacedItem } from "~/store/roomStore";
 import {
+  checkPlacement,
   getEffectiveFootprint,
   getPolygonBounds,
   getWallSegments,
 } from "~/lib/geometry";
+import { sanitizeOpenings, type Opening } from "~/lib/openings";
 import {
   FLOOR_PERIOD_CM,
   getFloorOption,
@@ -71,6 +75,10 @@ export default function Walkthrough() {
   const floorColor = useRoomStore((state) => state.floorColor);
   const floorType = useRoomStore((state) => state.floorType);
   const placedItems = useRoomStore((state) => state.placedItems);
+  const openings = useRoomStore((state) => state.openings);
+
+  // Walk mode: first-person view inside the room (vs. the orbit overview)
+  const [walk, setWalk] = useState(false);
 
   // Same idea as the 2D floor plan: work in coordinates relative to the
   // room's bounding-box corner, in meters (three.js convention).
@@ -107,6 +115,61 @@ export default function Walkthrough() {
 
   const maxDim = Math.max(roomWidthM, roomDepthM);
 
+  const roomOpenings = useMemo(
+    () => sanitizeOpenings(shape.points, openings, shape.heightCm),
+    [shape.points, openings, shape.heightCm]
+  );
+
+  // Same room, in centimeters, for the "can I stand here?" check used
+  // while walking.
+  const roomCm = useMemo(
+    () => ({
+      polygon: localPointsM.map((p) => ({ x: p.x * 100, z: p.z * 100 })),
+      widthCm: roomWidthM * 100,
+      depthCm: roomDepthM * 100,
+    }),
+    [localPointsM, roomWidthM, roomDepthM]
+  );
+
+  // Standing room for a person (a 40cm square): inside the walls and
+  // not inside furniture.
+  const canStand = (xM: number, zM: number) =>
+    checkPlacement({
+      center: { x: xM * 100, z: zM * 100 },
+      widthCm: 40,
+      depthCm: 40,
+      rotationY: 0,
+      others: placedItems,
+      room: roomCm,
+    }).ok;
+
+  // Where the walker starts: the free spot closest to the room's middle
+  const walkStart = useMemo(() => {
+    let best: [number, number] = [roomWidthM / 2, roomDepthM / 2];
+    let bestDist = Infinity;
+    for (let x = 20; x < roomCm.widthCm; x += 20) {
+      for (let z = 20; z < roomCm.depthCm; z += 20) {
+        const ok = checkPlacement({
+          center: { x, z },
+          widthCm: 40,
+          depthCm: 40,
+          rotationY: 0,
+          others: placedItems,
+          room: roomCm,
+        }).ok;
+        if (!ok) continue;
+        const d = Math.hypot(x - roomCm.widthCm / 2, z - roomCm.depthCm / 2);
+        if (d < bestDist) {
+          bestDist = d;
+          best = [x / 100, z / 100];
+        }
+      }
+    }
+    return best;
+    // Only needs to be right when walking starts
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [walk]);
+
   return (
     <div className="min-h-screen bg-stone-50 dark:bg-stone-950">
       <StepNav />
@@ -120,21 +183,40 @@ export default function Walkthrough() {
         </Link>
       </div>
 
-      <div className="mx-auto h-[70vh] max-w-6xl overflow-hidden rounded-2xl bg-stone-800 px-0 shadow-inner sm:mx-6">
+      <div className="relative mx-auto h-[70vh] max-w-6xl overflow-hidden rounded-2xl bg-stone-800 px-0 shadow-inner sm:mx-6">
+        {mounted && (
+          <div className="pointer-events-none absolute top-3 right-3 left-3 z-10 flex items-start justify-between gap-3">
+            <p className="rounded-lg bg-black/45 px-3 py-1.5 text-xs text-white">
+              {walk
+                ? "Drag to look · W A S D or arrow keys to move · Shift to run"
+                : "Drag to orbit · scroll to zoom · right-drag to pan"}
+            </p>
+            <button
+              type="button"
+              onClick={() => setWalk((w) => !w)}
+              className="pointer-events-auto rounded-full bg-white px-4 py-2 text-xs font-medium text-stone-900 shadow hover:bg-stone-100"
+            >
+              {walk ? "⤴ Back to overview" : "🚶 Walk inside"}
+            </button>
+          </div>
+        )}
         {mounted ? (
           <Canvas
             // Re-created if the room's size changes so the camera starts
             // in a sensible spot for the new room.
-            key={`${roomWidthM.toFixed(2)}x${roomDepthM.toFixed(2)}`}
+            key={`${roomWidthM.toFixed(2)}x${roomDepthM.toFixed(2)}-${walk ? "walk" : "orbit"}`}
             shadows
             dpr={[1, 2]}
             camera={{
-              position: [
-                roomWidthM / 2 + maxDim * 0.9,
-                heightM + maxDim * 0.8,
-                roomDepthM / 2 + maxDim * 1.1,
-              ],
-              fov: 45,
+              position: walk
+                ? [walkStart[0], 1.6, walkStart[1]]
+                : [
+                    roomWidthM / 2 + maxDim * 0.9,
+                    heightM + maxDim * 0.8,
+                    roomDepthM / 2 + maxDim * 1.1,
+                  ],
+              fov: walk ? 70 : 45,
+              near: 0.05,
             }}
           >
             <color attach="background" args={["#d9d4cc"]} />
@@ -193,25 +275,25 @@ export default function Walkthrough() {
             />
 
             {walls.map((w, i) => (
-              <Wall key={i} wall={w} heightM={heightM} color={wallColor} />
+              <Wall
+                key={i}
+                wall={w}
+                heightM={heightM}
+                color={wallColor}
+                openings={roomOpenings.filter((o) => o.edgeIndex === w.edgeIndex)}
+              />
             ))}
 
             {/* Baseboards: a thin trim strip along the foot of each wall,
-                just inside the room */}
-            {walls.map((w, i) => (
-              <mesh
-                key={`bb-${i}`}
-                position={[
-                  w.edgeMidX - w.outwardX * 0.01,
-                  BASEBOARD_HEIGHT_M / 2,
-                  w.edgeMidZ - w.outwardZ * 0.01,
-                ]}
-                rotation={[0, w.angleY, 0]}
-                receiveShadow
-              >
-                <boxGeometry args={[w.edgeLength, BASEBOARD_HEIGHT_M, 0.02]} />
-                <meshStandardMaterial color="#fbfaf7" roughness={0.5} />
-              </mesh>
+                just inside the room (broken at doorways) */}
+            {walls.map((w) => (
+              <Baseboards
+                key={`bb-${w.edgeIndex}`}
+                wall={w}
+                doors={roomOpenings.filter(
+                  (o) => o.edgeIndex === w.edgeIndex && o.type === "door"
+                )}
+              />
             ))}
 
             {/* Furniture, from the same data the 2D planner uses. Real
@@ -224,13 +306,21 @@ export default function Walkthrough() {
               ))}
             </Suspense>
 
-            <OrbitControls
-              target={[roomWidthM / 2, heightM * 0.3, roomDepthM / 2]}
-              maxPolarAngle={Math.PI / 2 - 0.05}
-              minDistance={maxDim * 0.4}
-              maxDistance={maxDim * 3}
-              enableDamping
-            />
+            {walk ? (
+              <WalkControls
+                start={walkStart}
+                lookAt={[roomWidthM / 2, roomDepthM / 2]}
+                canStand={canStand}
+              />
+            ) : (
+              <OrbitControls
+                target={[roomWidthM / 2, heightM * 0.3, roomDepthM / 2]}
+                maxPolarAngle={Math.PI / 2 - 0.05}
+                minDistance={maxDim * 0.4}
+                maxDistance={maxDim * 3}
+                enableDamping
+              />
+            )}
           </Canvas>
         ) : (
           <div className="p-6 text-sm text-stone-300">Loading 3D view…</div>
@@ -287,47 +377,350 @@ function Floor({
   );
 }
 
-// One wall slab. Walls between the camera and the room's inside fade to
-// nearly see-through so you can always look in, while the walls behind
-// stay solid - which makes the room read as a room.
+// Baseboard strips for one wall, skipping the width of any doors.
+function Baseboards({
+  wall,
+  doors,
+}: {
+  wall: ReturnType<typeof getWallSegments>[number];
+  doors: Opening[];
+}) {
+  // Spans along the EDGE (0 = its start corner), in meters
+  const spans: Array<[number, number]> = [];
+  let cursor = 0;
+  for (const d of [...doors].sort((p, q) => p.centerCm - q.centerCm)) {
+    const start = (d.centerCm - d.widthCm / 2) / 100 - 0.05;
+    const end = (d.centerCm + d.widthCm / 2) / 100 + 0.05;
+    if (start > cursor) spans.push([cursor, start]);
+    cursor = Math.max(cursor, end);
+  }
+  if (cursor < wall.edgeLength) spans.push([cursor, wall.edgeLength]);
+
+  // Where the edge's start corner sits in the slab's own frame
+  const edgeStartX = -wall.alongOffset;
+  // Which way the slab's own "z" axis points relative to "outward"
+  // (it depends on which way the room outline winds): +1 if the same.
+  const sideSign =
+    wall.outwardX * Math.sin(wall.angleY) + wall.outwardZ * Math.cos(wall.angleY) > 0
+      ? 1
+      : -1;
+  return (
+    <group
+      position={[wall.centerX, 0, wall.centerZ]}
+      rotation={[0, wall.angleY, 0]}
+    >
+      {spans
+        .filter(([a, b]) => b - a > 0.02)
+        .map(([a, b], i) => (
+          <mesh
+            key={i}
+            position={[
+              edgeStartX + (a + b) / 2,
+              BASEBOARD_HEIGHT_M / 2,
+              // slab is centered half a thickness OUTSIDE the edge, so
+              // step back in (toward the room) to sit on the floor side
+              -sideSign * (WALL_THICKNESS_M / 2 + 0.01),
+            ]}
+            receiveShadow
+          >
+            <boxGeometry args={[b - a, BASEBOARD_HEIGHT_M, 0.02]} />
+            <meshStandardMaterial color="#fbfaf7" roughness={0.5} />
+          </mesh>
+        ))}
+    </group>
+  );
+}
+
+// One wall. It's built from separate boxes so doors and windows can be
+// real openings: full-height pieces between openings, a strip under each
+// window, and a strip over each window or door. Walls between the camera
+// and the room's inside fade to nearly see-through so you can always look
+// in, while the walls behind stay solid - which makes the room read as a
+// room.
 function Wall({
   wall,
   heightM,
   color,
+  openings,
 }: {
   wall: ReturnType<typeof getWallSegments>[number];
   heightM: number;
   color: string;
+  openings: Opening[];
 }) {
-  const meshRef = useRef<Mesh>(null);
-  const opacity = useRef(1);
+  const groupRef = useRef<Group>(null);
+  const fade = useRef(1);
+  const material = useMemo(
+    () =>
+      new MeshStandardMaterial({ color, roughness: 0.95, transparent: true }),
+    // color is applied separately below so a color change doesn't
+    // rebuild the material
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    []
+  );
+  useEffect(() => {
+    material.color.set(color);
+  }, [color, material]);
+  useEffect(() => () => material.dispose(), [material]);
 
   useFrame(({ camera }, delta) => {
-    const mesh = meshRef.current;
-    if (!mesh) return;
     const towardCamera =
       (camera.position.x - wall.edgeMidX) * wall.outwardX +
       (camera.position.z - wall.edgeMidZ) * wall.outwardZ;
     const target = towardCamera > 0 ? 0.08 : 1;
-    opacity.current = MathUtils.damp(opacity.current, target, 8, delta);
-    const material = mesh.material as MeshStandardMaterial;
-    material.opacity = opacity.current;
-    material.depthWrite = opacity.current > 0.5;
-    mesh.castShadow = opacity.current > 0.5;
+    fade.current = MathUtils.damp(fade.current, target, 8, delta);
+    material.opacity = fade.current;
+    material.depthWrite = fade.current > 0.5;
+    const casts = fade.current > 0.5;
+    groupRef.current?.children.forEach((child) => {
+      if ((child as Mesh).isMesh && child.userData.wallPiece) {
+        child.castShadow = casts;
+      }
+    });
   });
 
+  // Where each solid piece goes, measured along the wall from its middle
+  const pieces = useMemo(() => {
+    const out: Array<{ x0: number; x1: number; y0: number; y1: number }> = [];
+    const half = wall.length / 2;
+    const sorted = [...openings].sort((p, q) => p.centerCm - q.centerCm);
+    let cursor = -half;
+    for (const o of sorted) {
+      const start = (o.centerCm - o.widthCm / 2) / 100 - wall.alongOffset;
+      const end = (o.centerCm + o.widthCm / 2) / 100 - wall.alongOffset;
+      const sill = o.sillCm / 100;
+      const top = (o.sillCm + o.heightCm) / 100;
+      out.push({ x0: cursor, x1: start, y0: 0, y1: heightM });
+      if (sill > 0.001) out.push({ x0: start, x1: end, y0: 0, y1: sill });
+      if (top < heightM - 0.001) out.push({ x0: start, x1: end, y0: top, y1: heightM });
+      cursor = end;
+    }
+    out.push({ x0: cursor, x1: half, y0: 0, y1: heightM });
+    return out.filter((p) => p.x1 - p.x0 > 0.005 && p.y1 - p.y0 > 0.005);
+  }, [openings, wall.length, wall.alongOffset, heightM]);
+
   return (
-    <mesh
-      ref={meshRef}
-      position={[wall.centerX, heightM / 2, wall.centerZ]}
+    <group
+      ref={groupRef}
+      position={[wall.centerX, 0, wall.centerZ]}
       rotation={[0, wall.angleY, 0]}
-      receiveShadow
     >
-      <boxGeometry args={[wall.length, heightM, WALL_THICKNESS_M]} />
-      {/* Always "transparent" so fading never needs a shader rebuild */}
-      <meshStandardMaterial color={color} roughness={0.95} transparent />
-    </mesh>
+      {pieces.map((p, i) => (
+        <mesh
+          key={i}
+          userData={{ wallPiece: true }}
+          position={[(p.x0 + p.x1) / 2, (p.y0 + p.y1) / 2, 0]}
+          material={material}
+          receiveShadow
+        >
+          <boxGeometry args={[p.x1 - p.x0, p.y1 - p.y0, WALL_THICKNESS_M]} />
+        </mesh>
+      ))}
+      {openings.map((o) => (
+        <OpeningFixture
+          key={o.id}
+          opening={o}
+          x={o.centerCm / 100 - wall.alongOffset}
+          fade={fade}
+        />
+      ))}
+    </group>
   );
+}
+
+// The door leaf or window glass + frame that fills an opening, plus
+// white trim around it. Fades along with its wall.
+function OpeningFixture({
+  opening,
+  x,
+  fade,
+}: {
+  opening: Opening;
+  x: number;
+  fade: RefObject<number>;
+}) {
+  const w = opening.widthCm / 100;
+  const h = opening.heightCm / 100;
+  const y0 = opening.sillCm / 100;
+  const trim = 0.05;
+  const T = WALL_THICKNESS_M;
+
+  const materials = useMemo(
+    () => ({
+      trim: new MeshStandardMaterial({ color: "#fbfaf7", roughness: 0.5, transparent: true }),
+      leaf: new MeshStandardMaterial({ color: "#a9825a", roughness: 0.6, transparent: true }),
+      glass: new MeshStandardMaterial({
+        color: "#cfe9f7",
+        roughness: 0.05,
+        metalness: 0.1,
+        transparent: true,
+      }),
+      handle: new MeshStandardMaterial({ color: "#c8c5bd", metalness: 0.8, roughness: 0.3, transparent: true }),
+    }),
+    []
+  );
+  useEffect(
+    () => () => Object.values(materials).forEach((m) => m.dispose()),
+    [materials]
+  );
+  useFrame(() => {
+    const f = fade.current ?? 1;
+    materials.trim.opacity = f;
+    materials.leaf.opacity = f;
+    materials.handle.opacity = f;
+    materials.glass.opacity = 0.28 * f;
+  });
+
+  // Trim: left, right, top (and a sill for windows)
+  const trimPieces: Array<[number, number, number, number]> = [
+    [-w / 2 - trim / 2, y0 + h / 2, trim, h + trim],
+    [w / 2 + trim / 2, y0 + h / 2, trim, h + trim],
+    [0, y0 + h + trim / 2, w + trim * 2, trim],
+  ];
+  if (opening.type === "window") {
+    trimPieces.push([0, y0 - trim / 2, w + trim * 2, trim]);
+  }
+
+  return (
+    <group position={[x, 0, 0]}>
+      {trimPieces.map(([px, py, sw, sh], i) => (
+        <mesh key={i} position={[px, py, 0]} material={materials.trim} castShadow>
+          <boxGeometry args={[sw, sh, T + 0.02]} />
+        </mesh>
+      ))}
+      {opening.type === "window" ? (
+        <>
+          <mesh position={[0, y0 + h / 2, 0]} material={materials.glass}>
+            <boxGeometry args={[w, h, 0.012]} />
+          </mesh>
+          {/* Cross bars */}
+          <mesh position={[0, y0 + h / 2, 0]} material={materials.trim}>
+            <boxGeometry args={[0.03, h, 0.03]} />
+          </mesh>
+          <mesh position={[0, y0 + h / 2, 0]} material={materials.trim}>
+            <boxGeometry args={[w, 0.03, 0.03]} />
+          </mesh>
+        </>
+      ) : (
+        <>
+          <mesh position={[0, y0 + h / 2, 0]} material={materials.leaf} castShadow receiveShadow>
+            <boxGeometry args={[w, h, 0.04]} />
+          </mesh>
+          <mesh position={[w / 2 - 0.07, y0 + h * 0.48, 0.04]} material={materials.handle}>
+            <sphereGeometry args={[0.025, 12, 12]} />
+          </mesh>
+          <mesh position={[w / 2 - 0.07, y0 + h * 0.48, -0.04]} material={materials.handle}>
+            <sphereGeometry args={[0.025, 12, 12]} />
+          </mesh>
+        </>
+      )}
+    </group>
+  );
+}
+
+// First-person controls: drag to look around, W A S D / arrow keys to
+// walk (Shift to run). `canStand` stops you walking through walls and
+// furniture, and each axis is tried separately so you slide along
+// obstacles instead of sticking to them.
+function WalkControls({
+  start,
+  lookAt,
+  canStand,
+}: {
+  start: [number, number];
+  lookAt: [number, number];
+  canStand: (x: number, z: number) => boolean;
+}) {
+  const { camera, gl } = useThree();
+  const state = useRef({
+    yaw: 0,
+    pitch: 0,
+    keys: new Set<string>(),
+    dragging: false,
+    lastX: 0,
+    lastY: 0,
+  });
+  const canStandRef = useRef(canStand);
+  canStandRef.current = canStand;
+
+  useEffect(() => {
+    const st = state.current;
+    camera.position.set(start[0], 1.6, start[1]);
+    camera.rotation.order = "YXZ";
+    // Start by looking toward the middle of the room (or straight "up"
+    // the plan if already standing there)
+    const dx = lookAt[0] - start[0];
+    const dz = lookAt[1] - start[1];
+    st.yaw = Math.hypot(dx, dz) > 0.5 ? Math.atan2(-dx, -dz) : 0;
+    st.pitch = 0;
+
+    const canvas = gl.domElement;
+    canvas.style.touchAction = "none";
+
+    const onDown = (e: PointerEvent) => {
+      st.dragging = true;
+      st.lastX = e.clientX;
+      st.lastY = e.clientY;
+      canvas.setPointerCapture(e.pointerId);
+    };
+    const onMove = (e: PointerEvent) => {
+      if (!st.dragging) return;
+      st.yaw -= (e.clientX - st.lastX) * 0.004;
+      st.pitch = MathUtils.clamp(st.pitch - (e.clientY - st.lastY) * 0.004, -1.2, 1.2);
+      st.lastX = e.clientX;
+      st.lastY = e.clientY;
+    };
+    const onUp = () => {
+      st.dragging = false;
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (target && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)) return;
+      st.keys.add(e.key.toLowerCase());
+      if (e.key.startsWith("Arrow")) e.preventDefault();
+    };
+    const onKeyUp = (e: KeyboardEvent) => st.keys.delete(e.key.toLowerCase());
+
+    canvas.addEventListener("pointerdown", onDown);
+    canvas.addEventListener("pointermove", onMove);
+    canvas.addEventListener("pointerup", onUp);
+    canvas.addEventListener("pointercancel", onUp);
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("keyup", onKeyUp);
+    return () => {
+      canvas.removeEventListener("pointerdown", onDown);
+      canvas.removeEventListener("pointermove", onMove);
+      canvas.removeEventListener("pointerup", onUp);
+      canvas.removeEventListener("pointercancel", onUp);
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keyup", onKeyUp);
+    };
+  }, [camera, gl, start, lookAt]);
+
+  useFrame((_, delta) => {
+    const st = state.current;
+    camera.rotation.set(st.pitch, st.yaw, 0);
+
+    const k = st.keys;
+    const forward = (k.has("w") || k.has("arrowup") ? 1 : 0) - (k.has("s") || k.has("arrowdown") ? 1 : 0);
+    const strafe = (k.has("d") || k.has("arrowright") ? 1 : 0) - (k.has("a") || k.has("arrowleft") ? 1 : 0);
+    if (forward === 0 && strafe === 0) return;
+
+    const speed = (k.has("shift") ? 3.2 : 1.6) * Math.min(delta, 0.1);
+    const fx = -Math.sin(st.yaw);
+    const fz = -Math.cos(st.yaw);
+    const rx = Math.cos(st.yaw);
+    const rz = -Math.sin(st.yaw);
+    const len = Math.hypot(forward, strafe) || 1;
+    const moveX = ((fx * forward + rx * strafe) / len) * speed;
+    const moveZ = ((fz * forward + rz * strafe) / len) * speed;
+
+    const { x, z } = camera.position;
+    if (canStandRef.current(x + moveX, z)) camera.position.x = x + moveX;
+    if (canStandRef.current(camera.position.x, z + moveZ)) camera.position.z = z + moveZ;
+  });
+
+  return null;
 }
 
 // A stable, pleasant wood-ish tone per product, so different placeholder

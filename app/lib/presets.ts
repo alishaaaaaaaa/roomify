@@ -3,6 +3,7 @@
 
 import type { RoomShape } from "~/store/roomStore";
 import type { FloorId } from "~/lib/flooring";
+import type { Opening } from "~/lib/openings";
 
 export type RoomPreset = {
   id: string;
@@ -11,7 +12,11 @@ export type RoomPreset = {
   shape: RoomShape;
   wallColor: string;
   floorType: FloorId;
+  openings: Array<Omit<Opening, "id">>;
 };
+
+const DOOR = { type: "door" as const, widthCm: 90, heightCm: 205, sillCm: 0 };
+const WINDOW = { type: "window" as const, widthCm: 130, heightCm: 120, sillCm: 90 };
 
 export const ROOM_PRESETS: RoomPreset[] = [
   {
@@ -29,6 +34,11 @@ export const ROOM_PRESETS: RoomPreset[] = [
     },
     wallColor: "#f1ece4",
     floorType: "hardwood-light",
+    openings: [
+      { ...WINDOW, edgeIndex: 0, centerCm: 225 },
+      { ...WINDOW, edgeIndex: 1, centerCm: 175 },
+      { ...DOOR, edgeIndex: 2, centerCm: 80 },
+    ],
   },
   {
     id: "living-l",
@@ -47,6 +57,11 @@ export const ROOM_PRESETS: RoomPreset[] = [
     },
     wallColor: "#e3e6e1",
     floorType: "hardwood-natural",
+    openings: [
+      { ...WINDOW, edgeIndex: 0, centerCm: 130, widthCm: 150 },
+      { ...WINDOW, edgeIndex: 0, centerCm: 370, widthCm: 150 },
+      { ...DOOR, edgeIndex: 4, centerCm: 150 },
+    ],
   },
   {
     id: "bedroom",
@@ -63,6 +78,10 @@ export const ROOM_PRESETS: RoomPreset[] = [
     },
     wallColor: "#d9e0e6",
     floorType: "hardwood-dark",
+    openings: [
+      { ...WINDOW, edgeIndex: 0, centerCm: 180 },
+      { ...DOOR, edgeIndex: 3, centerCm: 80 },
+    ],
   },
   {
     id: "loft",
@@ -79,6 +98,11 @@ export const ROOM_PRESETS: RoomPreset[] = [
     },
     wallColor: "#f7f7f5",
     floorType: "concrete",
+    openings: [
+      { ...WINDOW, edgeIndex: 0, centerCm: 150, widthCm: 180, heightCm: 200, sillCm: 40 },
+      { ...WINDOW, edgeIndex: 0, centerCm: 450, widthCm: 180, heightCm: 200, sillCm: 40 },
+      { ...DOOR, edgeIndex: 2, centerCm: 100 },
+    ],
   },
 ];
 
