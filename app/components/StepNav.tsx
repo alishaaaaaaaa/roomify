@@ -17,7 +17,7 @@ export function StepNav() {
 
   return (
     <header className="border-b border-stone-200 bg-white/80 backdrop-blur dark:border-stone-800 dark:bg-stone-950/80">
-      <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-4">
+      <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-2 px-4 py-3 sm:px-6 sm:py-4">
         <Link
           to="/"
           className="text-lg font-semibold tracking-tight text-stone-900 dark:text-stone-100"
@@ -32,7 +32,7 @@ export function StepNav() {
                 key={step.path}
                 to={step.path}
                 className={
-                  "rounded-full px-3 py-1.5 text-sm font-medium transition-colors " +
+                  "rounded-full px-2.5 py-1.5 text-xs font-medium transition-colors sm:px-3 sm:text-sm " +
                   (isActive
                     ? "bg-stone-900 text-white dark:bg-stone-100 dark:text-stone-900"
                     : "text-stone-500 hover:bg-stone-100 hover:text-stone-900 dark:text-stone-400 dark:hover:bg-stone-800 dark:hover:text-stone-100")

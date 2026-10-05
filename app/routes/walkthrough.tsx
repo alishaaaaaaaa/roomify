@@ -79,6 +79,8 @@ export default function Walkthrough() {
 
   // Walk mode: first-person view inside the room (vs. the orbit overview)
   const [walk, setWalk] = useState(false);
+  // On-screen arrow buttons (for touch screens) press these "keys"
+  const virtualKeys = useRef(new Set<string>());
 
   // Same idea as the 2D floor plan: work in coordinates relative to the
   // room's bounding-box corner, in meters (three.js convention).
@@ -174,7 +176,7 @@ export default function Walkthrough() {
     <div className="min-h-screen bg-stone-50 dark:bg-stone-950">
       <StepNav />
 
-      <div className="mx-auto max-w-6xl px-6 py-4">
+      <div className="mx-auto max-w-6xl px-4 py-4 sm:px-6">
         <Link
           to="/design"
           className="text-xs font-medium text-stone-500 hover:text-stone-900 dark:text-stone-400 dark:hover:text-stone-100"
@@ -186,7 +188,7 @@ export default function Walkthrough() {
       <div className="relative mx-auto h-[70vh] max-w-6xl overflow-hidden rounded-2xl bg-stone-800 px-0 shadow-inner sm:mx-6">
         {mounted && (
           <div className="pointer-events-none absolute top-3 right-3 left-3 z-10 flex items-start justify-between gap-3">
-            <p className="rounded-lg bg-black/45 px-3 py-1.5 text-xs text-white">
+            <p className="hidden rounded-lg bg-black/45 px-3 py-1.5 text-xs text-white sm:block">
               {walk
                 ? "Drag to look · W A S D or arrow keys to move · Shift to run"
                 : "Drag to orbit · scroll to zoom · right-drag to pan"}
@@ -201,6 +203,7 @@ export default function Walkthrough() {
           </div>
         )}
         {mounted ? (
+          <>
           <Canvas
             // Re-created if the room's size changes so the camera starts
             // in a sensible spot for the new room.
@@ -311,6 +314,7 @@ export default function Walkthrough() {
                 start={walkStart}
                 lookAt={[roomWidthM / 2, roomDepthM / 2]}
                 canStand={canStand}
+                virtualKeys={virtualKeys}
               />
             ) : (
               <OrbitControls
@@ -322,6 +326,8 @@ export default function Walkthrough() {
               />
             )}
           </Canvas>
+          {walk && <TouchPad virtualKeys={virtualKeys} />}
+          </>
         ) : (
           <div className="p-6 text-sm text-stone-300">Loading 3D view…</div>
         )}
@@ -618,6 +624,40 @@ function OpeningFixture({
   );
 }
 
+// Four on-screen arrow buttons for walking on a touch screen (shown only
+// on devices whose main input is touch; looking around is a finger drag
+// on the scene itself).
+function TouchPad({ virtualKeys }: { virtualKeys: RefObject<Set<string>> }) {
+  const buttons: Array<{ key: string; label: string; className: string }> = [
+    { key: "w", label: "▲", className: "col-start-2 row-start-1" },
+    { key: "a", label: "◀", className: "col-start-1 row-start-2" },
+    { key: "s", label: "▼", className: "col-start-2 row-start-2" },
+    { key: "d", label: "▶", className: "col-start-3 row-start-2" },
+  ];
+  return (
+    <div className="absolute bottom-4 left-4 z-10 hidden grid-cols-3 gap-1 [@media(pointer:coarse)]:grid">
+      {buttons.map((b) => (
+        <button
+          key={b.key}
+          type="button"
+          aria-label={`Walk ${b.key}`}
+          onPointerDown={(e) => {
+            e.currentTarget.setPointerCapture(e.pointerId);
+            virtualKeys.current?.add(b.key);
+          }}
+          onPointerUp={() => virtualKeys.current?.delete(b.key)}
+          onPointerCancel={() => virtualKeys.current?.delete(b.key)}
+          onLostPointerCapture={() => virtualKeys.current?.delete(b.key)}
+          style={{ touchAction: "none" }}
+          className={`h-12 w-12 select-none rounded-full bg-white/80 text-lg text-stone-900 shadow active:bg-white ${b.className}`}
+        >
+          {b.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 // First-person controls: drag to look around, W A S D / arrow keys to
 // walk (Shift to run). `canStand` stops you walking through walls and
 // furniture, and each axis is tried separately so you slide along
@@ -626,10 +666,12 @@ function WalkControls({
   start,
   lookAt,
   canStand,
+  virtualKeys,
 }: {
   start: [number, number];
   lookAt: [number, number];
   canStand: (x: number, z: number) => boolean;
+  virtualKeys: RefObject<Set<string>>;
 }) {
   const { camera, gl } = useThree();
   const state = useRef({
@@ -701,7 +743,8 @@ function WalkControls({
     const st = state.current;
     camera.rotation.set(st.pitch, st.yaw, 0);
 
-    const k = st.keys;
+    // Real keys plus any on-screen buttons currently held
+    const k = new Set([...st.keys, ...(virtualKeys.current ?? [])]);
     const forward = (k.has("w") || k.has("arrowup") ? 1 : 0) - (k.has("s") || k.has("arrowdown") ? 1 : 0);
     const strafe = (k.has("d") || k.has("arrowright") ? 1 : 0) - (k.has("a") || k.has("arrowleft") ? 1 : 0);
     if (forward === 0 && strafe === 0) return;

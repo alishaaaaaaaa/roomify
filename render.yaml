@@ -1,0 +1,16 @@
+# Render "Blueprint": tells Render how to run this app. It builds the
+# Dockerfile in this folder. The three secrets are entered in Render's
+# dashboard (sync: false means "ask me, don't store it in the repo").
+services:
+  - type: web
+    name: roomify
+    runtime: docker
+    plan: free
+    healthCheckPath: /
+    envVars:
+      - key: SHOPIFY_STORE_DOMAIN
+        sync: false
+      - key: SHOPIFY_STOREFRONT_PRIVATE_TOKEN
+        sync: false
+      - key: SHOPIFY_STOREFRONT_API_VERSION
+        value: "2026-01"

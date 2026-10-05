@@ -107,9 +107,12 @@ export default function RoomSetup() {
 
   function pointFromEvent(e: { clientX: number; clientY: number }): RoomPoint {
     const rect = svgRef.current!.getBoundingClientRect();
+    // The drawing scales to fit narrow screens, so convert using its
+    // on-screen size rather than assuming a fixed 560px.
+    const cmPerPx = GRID_CM / rect.width;
     return {
-      x: snap((e.clientX - rect.left) / SCALE),
-      z: snap((e.clientY - rect.top) / SCALE),
+      x: snap((e.clientX - rect.left) * cmPerPx),
+      z: snap((e.clientY - rect.top) * cmPerPx),
     };
   }
 
@@ -124,9 +127,10 @@ export default function RoomSetup() {
   // a wall - it jumps to whichever wall is nearest, and slides along it.
   function moveOpeningTo(id: string, e: { clientX: number; clientY: number }) {
     const rect = svgRef.current!.getBoundingClientRect();
+    const cmPerPx = GRID_CM / rect.width;
     const snapped = snapToWall(shape.points, {
-      x: (e.clientX - rect.left) / SCALE,
-      z: (e.clientY - rect.top) / SCALE,
+      x: (e.clientX - rect.left) * cmPerPx,
+      z: (e.clientY - rect.top) * cmPerPx,
     });
     if (snapped) updateOpening(id, snapped);
   }
@@ -159,7 +163,7 @@ export default function RoomSetup() {
     <div className="min-h-screen bg-stone-50 dark:bg-stone-950">
       <StepNav />
 
-      <main className="mx-auto max-w-4xl px-6 py-12">
+      <main className="mx-auto max-w-4xl px-4 py-8 sm:px-6 sm:py-12">
         <h1 className="text-2xl font-semibold tracking-tight text-stone-900 dark:text-stone-100">
           Draw your room
         </h1>
@@ -170,13 +174,13 @@ export default function RoomSetup() {
         </p>
 
         <div className="mt-6 flex flex-col gap-6 sm:flex-row">
-          <div className="flex-shrink-0">
+          <div className="w-full flex-shrink-0 sm:w-[560px]">
             <svg
               ref={svgRef}
-              width={GRID_PX}
-              height={GRID_PX}
+              viewBox={`0 0 ${GRID_PX} ${GRID_PX}`}
+              width="100%"
+              className="block h-auto w-full rounded-2xl border border-stone-200 bg-white shadow-sm dark:border-stone-800 dark:bg-stone-900"
               onClick={handleCanvasClick}
-              className="rounded-2xl border border-stone-200 bg-white shadow-sm dark:border-stone-800 dark:bg-stone-900"
               style={{ cursor: isClosed ? "default" : "crosshair" }}
             >
               <FloorPatternDefs
@@ -638,24 +642,39 @@ function CornerHandle({
     if (!svgRef.current) return;
 
     const rect = svgRef.current.getBoundingClientRect();
+    const cmPerPx = GRID_CM / rect.width;
     onDrag({
-      x: snap((e.clientX - rect.left) / SCALE),
-      z: snap((e.clientY - rect.top) / SCALE),
+      x: snap((e.clientX - rect.left) * cmPerPx),
+      z: snap((e.clientY - rect.top) * cmPerPx),
     });
   }
 
   return (
-    <circle
-      cx={point.x * SCALE}
-      cy={point.z * SCALE}
-      r={7}
-      fill="#57534e"
-      stroke="white"
-      strokeWidth={2}
-      onPointerDown={handlePointerDown}
-      onPointerMove={handlePointerMove}
-      style={{ cursor: draggable ? "grab" : "default" }}
-    />
+    <g>
+      <circle
+        cx={point.x * SCALE}
+        cy={point.z * SCALE}
+        r={7}
+        fill="#57534e"
+        stroke="white"
+        strokeWidth={2}
+        pointerEvents="none"
+      />
+      {/* A larger invisible circle on top makes the corner easy to
+          grab with a finger */}
+      <circle
+        cx={point.x * SCALE}
+        cy={point.z * SCALE}
+        r={18}
+        fill="transparent"
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        style={{
+          cursor: draggable ? "grab" : "default",
+          touchAction: draggable ? "none" : "auto",
+        }}
+      />
+    </g>
   );
 }
 

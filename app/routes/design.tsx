@@ -57,6 +57,7 @@ import { SHARE_HASH_KEY, decodeRoom, encodeRoom } from "~/lib/share";
 import type { Route } from "./+types/design";
 
 const MAX_CANVAS_PX = 640;
+const MIN_CANVAS_PX = 240;
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max);
@@ -133,6 +134,23 @@ export default function Design({ loaderData }: Route.ComponentProps) {
   const updateItemPlacement = useRoomStore((state) => state.updateItemPlacement);
 
   const canvasRef = useRef<HTMLDivElement | null>(null);
+
+  // How wide the drawing can be: the space the middle column has, up to
+  // 640px. Measured in the browser (the server just assumes the max).
+  const columnRef = useRef<HTMLDivElement | null>(null);
+  const [canvasMaxPx, setCanvasMaxPx] = useState(MAX_CANVAS_PX);
+  useEffect(() => {
+    const el = columnRef.current;
+    if (!el) return;
+    const update = () =>
+      setCanvasMaxPx(
+        Math.min(MAX_CANVAS_PX, Math.max(MIN_CANVAS_PX, Math.floor(el.clientWidth)))
+      );
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
 
   // Because the room is saved in the browser, items placed in an earlier
   // visit carry old product details. Once the saved room has loaded,
@@ -273,7 +291,8 @@ export default function Design({ loaderData }: Route.ComponentProps) {
   const roomWidthCm = bounds.maxX - bounds.minX;
   const roomDepthCm = bounds.maxZ - bounds.minZ;
 
-  const scale = MAX_CANVAS_PX / Math.max(roomWidthCm, roomDepthCm);
+  // On narrow screens the drawing shrinks to fit the width available
+  const scale = canvasMaxPx / Math.max(roomWidthCm, roomDepthCm);
   const canvasWidthPx = roomWidthCm * scale;
   const canvasHeightPx = roomDepthCm * scale;
 
@@ -560,9 +579,9 @@ export default function Design({ loaderData }: Route.ComponentProps) {
       <div className="min-h-screen bg-stone-50 dark:bg-stone-950">
         <StepNav />
 
-        <main className="mx-auto flex max-w-6xl gap-8 px-6 py-8">
+        <main className="mx-auto flex max-w-6xl flex-col gap-6 px-4 py-6 lg:flex-row lg:gap-8 lg:px-6 lg:py-8">
           {/* Sidebar: real furniture pulled from Shopify */}
-          <aside className="w-64 flex-shrink-0">
+          <aside className="order-2 w-full lg:order-none lg:w-64 lg:flex-shrink-0">
             <Link
               to="/room-setup"
               className="text-xs font-medium text-stone-500 hover:text-stone-900 dark:text-stone-400 dark:hover:text-stone-100"
@@ -589,7 +608,7 @@ export default function Design({ loaderData }: Route.ComponentProps) {
                 refresh.
               </p>
             )}
-            <div className="mt-4 space-y-2">
+            <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-3 lg:block lg:space-y-2">
               {products.map((product) => (
                 <SidebarProduct key={product.id} product={product} />
               ))}
@@ -597,12 +616,12 @@ export default function Design({ loaderData }: Route.ComponentProps) {
           </aside>
 
           {/* The room itself, drawn top-down and scaled to real size */}
-          <div className="flex-1">
+          <div ref={columnRef} className="order-1 min-w-0 flex-1 lg:order-none">
             <p className="mb-2 text-xs text-stone-500 dark:text-stone-400">
               {shape.points.length}-corner room, {Math.round(roomWidthCm)}cm ×{" "}
               {Math.round(roomDepthCm)}cm (top-down view)
             </p>
-            <div className="mb-2 flex h-8 items-center gap-2">
+            <div className="mb-2 flex min-h-8 flex-wrap items-center gap-2">
               <button
                 type="button"
                 onClick={undo}
@@ -665,7 +684,7 @@ export default function Design({ loaderData }: Route.ComponentProps) {
           </div>
 
           {/* Running total, the beginning of the real commerce loop */}
-          <aside className="w-56 flex-shrink-0">
+          <aside className="order-3 w-full lg:order-none lg:w-56 lg:flex-shrink-0">
             <div className="rounded-2xl border border-stone-200 bg-white p-5 shadow-sm dark:border-stone-800 dark:bg-stone-900">
               <h2 className="text-sm font-semibold text-stone-900 dark:text-stone-100">
                 Your room
