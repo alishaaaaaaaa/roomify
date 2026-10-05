@@ -22,6 +22,7 @@ import {
   edgeLength,
   getOpeningLine,
   sanitizeOpenings,
+  snapToWall,
   type Opening,
   type OpeningType,
 } from "~/lib/openings";
@@ -117,6 +118,17 @@ export default function RoomSetup() {
     // corners are adjusted by dragging them instead
     const point = pointFromEvent(e);
     setShape({ ...shape, points: [...shape.points, point] });
+  }
+
+  // Dragging a door/window: it follows the pointer but always stays on
+  // a wall - it jumps to whichever wall is nearest, and slides along it.
+  function moveOpeningTo(id: string, e: { clientX: number; clientY: number }) {
+    const rect = svgRef.current!.getBoundingClientRect();
+    const snapped = snapToWall(shape.points, {
+      x: (e.clientX - rect.left) / SCALE,
+      z: (e.clientY - rect.top) / SCALE,
+    });
+    if (snapped) updateOpening(id, snapped);
   }
 
   function handleCornerDrag(index: number, point: RoomPoint) {
@@ -227,17 +239,40 @@ export default function RoomSetup() {
               {isClosed &&
                 validOpenings.map((o) => {
                   const line = getOpeningLine(shape.points, o);
+                  const coords = {
+                    x1: line.x1 * SCALE,
+                    y1: line.z1 * SCALE,
+                    x2: line.x2 * SCALE,
+                    y2: line.z2 * SCALE,
+                  };
                   return (
-                    <line
-                      key={o.id}
-                      x1={line.x1 * SCALE}
-                      y1={line.z1 * SCALE}
-                      x2={line.x2 * SCALE}
-                      y2={line.z2 * SCALE}
-                      stroke={o.type === "door" ? DOOR_COLOR : WINDOW_COLOR}
-                      strokeWidth={10}
-                      strokeLinecap="butt"
-                    />
+                    <g key={o.id}>
+                      <line
+                        {...coords}
+                        stroke={o.type === "door" ? DOOR_COLOR : WINDOW_COLOR}
+                        strokeWidth={10}
+                        strokeLinecap="butt"
+                      />
+                      {/* A wider invisible copy that's easy to grab */}
+                      <line
+                        {...coords}
+                        stroke="transparent"
+                        strokeWidth={26}
+                        style={{ cursor: "grab", touchAction: "none" }}
+                        onClick={(e) => e.stopPropagation()}
+                        onPointerDown={(e) => {
+                          e.stopPropagation();
+                          e.currentTarget.setPointerCapture(e.pointerId);
+                        }}
+                        onPointerMove={(e) => {
+                          if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+                            moveOpeningTo(o.id, e);
+                          }
+                        }}
+                      >
+                        <title>Drag along the walls to move</title>
+                      </line>
+                    </g>
                   );
                 })}
 
@@ -432,7 +467,7 @@ export default function RoomSetup() {
               </div>
               {listedOpenings.length === 0 && (
                 <p className="mt-2 text-xs text-stone-500 dark:text-stone-400">
-                  None yet. Doors show brown and windows blue on the plan.
+                  None yet. Doors show brown and windows blue on the plan - drag them along the walls to move them.
                 </p>
               )}
               <div className="mt-3 space-y-3">

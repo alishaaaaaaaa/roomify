@@ -50,6 +50,7 @@ import {
   WINDOW_COLOR,
   getOpeningLine,
   sanitizeOpenings,
+  snapToWall,
   type Opening,
 } from "~/lib/openings";
 import { SHARE_HASH_KEY, decodeRoom, encodeRoom } from "~/lib/share";
@@ -126,6 +127,7 @@ export default function Design({ loaderData }: Route.ComponentProps) {
   const placedItems = useRoomStore((state) => state.placedItems);
   const openings = useRoomStore((state) => state.openings);
   const loadRoom = useRoomStore((state) => state.loadRoom);
+  const updateOpening = useRoomStore((state) => state.updateOpening);
   const addItem = useRoomStore((state) => state.addItem);
   const updateItemPosition = useRoomStore((state) => state.updateItemPosition);
   const updateItemPlacement = useRoomStore((state) => state.updateItemPlacement);
@@ -349,6 +351,19 @@ export default function Design({ loaderData }: Route.ComponentProps) {
       x: (start.clientX + event.delta.x - rect.left) / scale,
       z: (start.clientY + event.delta.y - rect.top) / scale,
     };
+  }
+
+  // Dragging a door/window on the plan: stays on the walls, jumping to
+  // the nearest one and sliding along it.
+  function handleMoveOpening(id: string, clientX: number, clientY: number) {
+    const canvasEl = canvasRef.current;
+    if (!canvasEl) return;
+    const rect = canvasEl.getBoundingClientRect();
+    const snapped = snapToWall(shape.points, {
+      x: (clientX - rect.left) / scale + bounds.minX,
+      z: (clientY - rect.top) / scale + bounds.minZ,
+    });
+    if (snapped) updateOpening(id, snapped);
   }
 
   function handleDragMove(event: DragMoveEvent) {
@@ -632,6 +647,7 @@ export default function Design({ loaderData }: Route.ComponentProps) {
               floorColor={floorColor}
               floorType={floorType}
               guides={guides}
+              onMoveOpening={handleMoveOpening}
               openings={sanitizeOpenings(shape.points, openings, shape.heightCm)}
               points={shape.points}
               bounds={bounds}
@@ -961,6 +977,7 @@ function RoomCanvas({
   floorColor,
   floorType,
   guides,
+  onMoveOpening,
   openings,
   points,
   bounds,
@@ -974,6 +991,7 @@ function RoomCanvas({
   floorColor: string;
   floorType: FloorId;
   guides: { x: number | null; z: number | null };
+  onMoveOpening: (id: string, clientX: number, clientY: number) => void;
   openings: Opening[];
   points: Array<{ x: number; z: number }>;
   bounds: { minX: number; minZ: number };
@@ -1017,23 +1035,52 @@ function RoomCanvas({
           strokeWidth={12}
           strokeLinejoin="round"
         />
-        {/* Doors (brown) and windows (blue), drawn over their walls */}
+      </svg>
+      <div className="absolute inset-0">{children}</div>
+      {/* Doors (brown) and windows (blue) on their walls. This layer sits
+          above the furniture so they can be grabbed and dragged along
+          the walls; only the lines themselves catch the pointer. */}
+      <svg
+        width={widthPx}
+        height={heightPx}
+        className="pointer-events-none absolute inset-0"
+      >
         {openings.map((o) => {
           const line = getOpeningLine(points, o);
+          const coords = {
+            x1: (line.x1 - bounds.minX) * scale,
+            y1: (line.z1 - bounds.minZ) * scale,
+            x2: (line.x2 - bounds.minX) * scale,
+            y2: (line.z2 - bounds.minZ) * scale,
+          };
           return (
-            <line
-              key={o.id}
-              x1={(line.x1 - bounds.minX) * scale}
-              y1={(line.z1 - bounds.minZ) * scale}
-              x2={(line.x2 - bounds.minX) * scale}
-              y2={(line.z2 - bounds.minZ) * scale}
-              stroke={o.type === "door" ? DOOR_COLOR : WINDOW_COLOR}
-              strokeWidth={12}
-            />
+            <g key={o.id}>
+              <line
+                {...coords}
+                stroke={o.type === "door" ? DOOR_COLOR : WINDOW_COLOR}
+                strokeWidth={12}
+              />
+              <line
+                {...coords}
+                stroke="transparent"
+                strokeWidth={24}
+                style={{ cursor: "grab", touchAction: "none", pointerEvents: "stroke" }}
+                onPointerDown={(e) => {
+                  e.stopPropagation();
+                  e.currentTarget.setPointerCapture(e.pointerId);
+                }}
+                onPointerMove={(e) => {
+                  if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+                    onMoveOpening(o.id, e.clientX, e.clientY);
+                  }
+                }}
+              >
+                <title>Drag along the walls to move</title>
+              </line>
+            </g>
           );
         })}
       </svg>
-      <div className="absolute inset-0">{children}</div>
       {/* Alignment guides (only while dragging, when something lines up) */}
       {guides.x !== null && (
         <div

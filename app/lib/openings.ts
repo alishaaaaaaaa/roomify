@@ -81,3 +81,35 @@ export function getOpeningLine(points: RoomPoint[], o: Opening) {
 
 export const DOOR_COLOR = "#a16207";
 export const WINDOW_COLOR = "#38bdf8";
+
+// Given a point (cm) the user is dragging an opening to, finds the wall
+// closest to it and where along that wall the point lands. Walls are the
+// only places an opening can go, so this always snaps to one.
+export function snapToWall(
+  points: RoomPoint[],
+  point: RoomPoint,
+  stepCm = 5
+): { edgeIndex: number; centerCm: number } | null {
+  let best: { edgeIndex: number; centerCm: number; dist: number } | null = null;
+  for (let i = 0; i < points.length; i++) {
+    const a = points[i];
+    const b = points[(i + 1) % points.length];
+    const dx = b.x - a.x;
+    const dz = b.z - a.z;
+    const len = Math.hypot(dx, dz);
+    if (len === 0) continue;
+    const t = Math.min(
+      Math.max(((point.x - a.x) * dx + (point.z - a.z) * dz) / (len * len), 0),
+      1
+    );
+    const dist = Math.hypot(point.x - (a.x + t * dx), point.z - (a.z + t * dz));
+    if (!best || dist < best.dist) {
+      best = { edgeIndex: i, centerCm: t * len, dist };
+    }
+  }
+  if (!best) return null;
+  return {
+    edgeIndex: best.edgeIndex,
+    centerCm: Math.round(best.centerCm / stepCm) * stepCm,
+  };
+}
