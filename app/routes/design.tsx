@@ -26,6 +26,7 @@ import {
   useDraggable,
   useDroppable,
   type DragEndEvent,
+  type DragMoveEvent,
 } from "@dnd-kit/core";
 import {
   createCartCheckoutUrl,
@@ -36,9 +37,11 @@ import { StepNav } from "~/components/StepNav";
 import { useRoomStore, type PlacedItem } from "~/store/roomStore";
 import {
   checkPlacement,
+  autoPlace,
   findValidCenter,
   getEffectiveFootprint,
   getPolygonBounds,
+  snapCenter,
 } from "~/lib/geometry";
 import { FloorPatternDefs, useFloorPaint } from "~/components/FloorPattern";
 import type { FloorId } from "~/lib/flooring";
@@ -51,8 +54,19 @@ function clamp(value: number, min: number, max: number) {
 }
 
 export async function loader() {
-  const products = await getProducts();
-  return { products };
+  // If Shopify can't be reached, still show the page with a clear
+  // message instead of crashing it.
+  try {
+    const products = await getProducts();
+    return { products, loadError: null as string | null };
+  } catch (error) {
+    console.error("Could not load products from Shopify:", error);
+    return {
+      products: [] as ShopifyProduct[],
+      loadError:
+        "Couldn't load the furniture catalog right now. Check your connection and refresh the page.",
+    };
+  }
 }
 
 // This runs on the SERVER whenever the "Buy this room" form below is
@@ -87,7 +101,7 @@ export async function action({ request }: Route.ActionArgs) {
 }
 
 export default function Design({ loaderData }: Route.ComponentProps) {
-  const { products } = loaderData;
+  const { products, loadError } = loaderData;
 
   const shape = useRoomStore((state) => state.shape);
   const wallColor = useRoomStore((state) => state.wallColor);
@@ -96,6 +110,11 @@ export default function Design({ loaderData }: Route.ComponentProps) {
   const hasHydrated = useRoomStore((state) => state.hasHydrated);
   const syncWithCatalog = useRoomStore((state) => state.syncWithCatalog);
   const clearItems = useRoomStore((state) => state.clearItems);
+  const setItems = useRoomStore((state) => state.setItems);
+  const undo = useRoomStore((state) => state.undo);
+  const redo = useRoomStore((state) => state.redo);
+  const canUndo = useRoomStore((state) => state.past.length > 0);
+  const canRedo = useRoomStore((state) => state.future.length > 0);
   const placedItems = useRoomStore((state) => state.placedItems);
   const addItem = useRoomStore((state) => state.addItem);
   const updateItemPosition = useRoomStore((state) => state.updateItemPosition);
@@ -120,6 +139,33 @@ export default function Design({ loaderData }: Route.ComponentProps) {
     noticeTimer.current = window.setTimeout(() => setNotice(null), 2500);
   }
   useEffect(() => () => window.clearTimeout(noticeTimer.current), []);
+
+  // Ctrl/Cmd+Z = undo, Ctrl/Cmd+Shift+Z or Ctrl+Y = redo. Ignored while
+  // typing in a text field.
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent) {
+      const target = e.target as HTMLElement | null;
+      if (target && /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName)) return;
+      const mod = e.ctrlKey || e.metaKey;
+      if (!mod) return;
+      const key = e.key.toLowerCase();
+      if (key === "z" && !e.shiftKey) {
+        e.preventDefault();
+        undo();
+      } else if ((key === "z" && e.shiftKey) || key === "y") {
+        e.preventDefault();
+        redo();
+      }
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [undo, redo]);
+
+  // Alignment guide lines shown while dragging (cm from the canvas corner)
+  const [guides, setGuides] = useState<{ x: number | null; z: number | null }>({
+    x: null,
+    z: null,
+  });
 
   // The room can be any shape, so there's no single "width" and "length" -
   // we find the smallest rectangle containing the shape, and scale/position
@@ -165,54 +211,103 @@ export default function Design({ loaderData }: Route.ComponentProps) {
     );
   }
 
-  function handleDragEnd(event: DragEndEvent) {
+  // What's being dragged: its size, angle and the other items it must
+  // avoid. (A new item from the sidebar starts unrotated.)
+  function getSubject(activeId: string) {
+    if (activeId.startsWith("sidebar-")) {
+      const product = products.find((p) => p.id === activeId.replace("sidebar-", ""));
+      if (!product) return null;
+      return {
+        kind: "new" as const,
+        product,
+        widthCm: product.widthCm ?? 60,
+        depthCm: product.depthCm ?? 60,
+        rotationY: 0,
+        others: placedItems,
+      };
+    }
+    if (activeId.startsWith("placed-")) {
+      const item = placedItems.find((i) => i.id === activeId.replace("placed-", ""));
+      if (!item) return null;
+      return {
+        kind: "move" as const,
+        item,
+        widthCm: item.widthCm,
+        depthCm: item.depthCm,
+        rotationY: item.rotationY,
+        others: placedItems.filter((i) => i.id !== item.id),
+      };
+    }
+    return null;
+  }
+
+  // Where the pointer currently is, in cm from the canvas's top-left.
+  function pointerToCm(event: DragMoveEvent | DragEndEvent) {
     const canvasEl = canvasRef.current;
-    if (!canvasEl) return;
+    if (!canvasEl) return null;
+    const rect = canvasEl.getBoundingClientRect();
+    // activatorEvent = where the drag began; delta = how far it moved.
+    const start = event.activatorEvent as PointerEvent;
+    return {
+      x: (start.clientX + event.delta.x - rect.left) / scale,
+      z: (start.clientY + event.delta.y - rect.top) / scale,
+    };
+  }
+
+  function handleDragMove(event: DragMoveEvent) {
+    const subject = getSubject(String(event.active.id));
+    const desired = pointerToCm(event);
+    if (!subject || !desired || !event.over || event.over.id !== "room-canvas") {
+      setGuides((g) => (g.x === null && g.z === null ? g : { x: null, z: null }));
+      return;
+    }
+    const snapped = snapCenter({ center: desired, ...subject, room });
+    setGuides((g) =>
+      g.x === snapped.guideX && g.z === snapped.guideZ
+        ? g
+        : { x: snapped.guideX, z: snapped.guideZ }
+    );
+  }
+
+  function handleDragEnd(event: DragEndEvent) {
+    setGuides({ x: null, z: null });
 
     // Only act if the item was actually dropped over the canvas
     if (!event.over || event.over.id !== "room-canvas") return;
 
-    const canvasRect = canvasEl.getBoundingClientRect();
+    const subject = getSubject(String(event.active.id));
+    const pointer = pointerToCm(event);
+    if (!subject || !pointer) return;
 
-    // event.activatorEvent is the original pointer-down event; event.delta
-    // is how far the pointer moved. Together: where the pointer ended up.
-    const activatorEvent = event.activatorEvent as PointerEvent;
-    const finalClientX = activatorEvent.clientX + event.delta.x;
-    const finalClientY = activatorEvent.clientY + event.delta.y;
+    // Line it up with nearby walls/items first, then make sure the spot
+    // is valid (sliding to the nearest free spot if it's taken).
+    const desired = snapCenter({ center: pointer, ...subject, room }).center;
+    const result = findValidCenter({
+      desired,
+      widthCm: subject.widthCm,
+      depthCm: subject.depthCm,
+      rotationY: subject.rotationY,
+      others: subject.others,
+      room,
+    });
+    if (!result.ok) {
+      explainFailure(result, subject.others);
+      return;
+    }
 
-    // Where it was dropped, in cm from the canvas's top-left corner
-    const desired = {
-      x: (finalClientX - canvasRect.left) / scale,
-      z: (finalClientY - canvasRect.top) / scale,
+    const footprint = getEffectiveFootprint(
+      subject.widthCm,
+      subject.depthCm,
+      subject.rotationY
+    );
+    const position = {
+      x: result.center.x - footprint.width / 2,
+      y: 0,
+      z: result.center.z - footprint.depth / 2,
     };
 
-    const activeId = String(event.active.id);
-
-    if (activeId.startsWith("sidebar-")) {
-      // Dragging a NEW item in from the sidebar
-      const productId = activeId.replace("sidebar-", "");
-      const product = products.find((p) => p.id === productId);
-      if (!product) return;
-
-      const widthCm = product.widthCm ?? 60;
-      const depthCm = product.depthCm ?? 60;
-      const heightCm = product.heightCm ?? 80;
-
-      // If the drop spot is taken, slide it to the nearest free spot
-      // (within a short distance); otherwise refuse and say why.
-      const result = findValidCenter({
-        desired,
-        widthCm,
-        depthCm,
-        rotationY: 0,
-        others: placedItems,
-        room,
-      });
-      if (!result.ok) {
-        explainFailure(result, placedItems);
-        return;
-      }
-
+    if (subject.kind === "new") {
+      const product = subject.product;
       addItem({
         id: crypto.randomUUID(),
         productId: product.id,
@@ -222,47 +317,56 @@ export default function Design({ loaderData }: Route.ComponentProps) {
         currencyCode: product.currencyCode,
         imageUrl: product.imageUrl,
         modelUrl: product.modelUrl,
-        widthCm,
-        heightCm,
-        depthCm,
-        position: {
-          x: result.center.x - widthCm / 2,
-          y: 0,
-          z: result.center.z - depthCm / 2,
-        },
+        widthCm: subject.widthCm,
+        heightCm: product.heightCm ?? 80,
+        depthCm: subject.depthCm,
+        position,
         rotationY: 0,
       });
-    } else if (activeId.startsWith("placed-")) {
-      // Repositioning an EXISTING item already in the room
-      const itemId = activeId.replace("placed-", "");
-      const item = placedItems.find((i) => i.id === itemId);
-      if (!item) return;
+    } else {
+      updateItemPosition(subject.item.id, position);
+    }
+  }
 
-      // It mustn't collide with itself, so it's left out of "others".
-      const others = placedItems.filter((i) => i.id !== itemId);
-      const result = findValidCenter({
-        desired,
-        widthCm: item.widthCm,
-        depthCm: item.depthCm,
-        rotationY: item.rotationY,
-        others,
-        room,
+  // Fills the room with one of each product (as many as fit), against
+  // the walls with gaps between. Undo brings the old layout back.
+  function handleAutoFurnish() {
+    if (products.length === 0) return;
+    const centers = autoPlace({
+      items: products.map((p) => ({
+        key: p.id,
+        widthCm: p.widthCm ?? 60,
+        depthCm: p.depthCm ?? 60,
+      })),
+      room,
+    });
+    const items: PlacedItem[] = [];
+    for (const product of products) {
+      const c = centers.get(product.id);
+      if (!c) continue;
+      const w = product.widthCm ?? 60;
+      const d = product.depthCm ?? 60;
+      items.push({
+        id: crypto.randomUUID(),
+        productId: product.id,
+        variantId: product.variantId,
+        title: product.title,
+        price: product.price,
+        currencyCode: product.currencyCode,
+        imageUrl: product.imageUrl,
+        modelUrl: product.modelUrl,
+        widthCm: w,
+        heightCm: product.heightCm ?? 80,
+        depthCm: d,
+        position: { x: c.x - w / 2, y: 0, z: c.z - d / 2 },
+        rotationY: 0,
       });
-      if (!result.ok) {
-        explainFailure(result, others);
-        return;
-      }
-
-      const footprint = getEffectiveFootprint(
-        item.widthCm,
-        item.depthCm,
-        item.rotationY
+    }
+    setItems(items);
+    if (items.length < products.length) {
+      showNotice(
+        `Placed ${items.length} of ${products.length} - the rest didn't fit.`
       );
-      updateItemPosition(itemId, {
-        x: result.center.x - footprint.width / 2,
-        y: 0,
-        z: result.center.z - footprint.depth / 2,
-      });
     }
   }
 
@@ -335,7 +439,12 @@ export default function Design({ loaderData }: Route.ComponentProps) {
   }
 
   return (
-    <DndContext onDragEnd={handleDragEnd}>
+    <DndContext
+      id="design-dnd"
+      onDragMove={handleDragMove}
+      onDragEnd={handleDragEnd}
+      onDragCancel={() => setGuides({ x: null, z: null })}
+    >
       <div className="min-h-screen bg-stone-50 dark:bg-stone-950">
         <StepNav />
 
@@ -354,6 +463,20 @@ export default function Design({ loaderData }: Route.ComponentProps) {
             <p className="mt-1 text-xs text-stone-500 dark:text-stone-400">
               Drag an item onto the room to place it.
             </p>
+            {loadError && (
+              <p
+                role="alert"
+                className="mt-4 rounded-lg bg-red-50 p-3 text-xs text-red-800 dark:bg-red-950 dark:text-red-200"
+              >
+                {loadError}
+              </p>
+            )}
+            {!loadError && products.length === 0 && (
+              <p className="mt-4 rounded-lg bg-stone-100 p-3 text-xs text-stone-600 dark:bg-stone-900 dark:text-stone-300">
+                No furniture in the store yet. Add products in Shopify and
+                refresh.
+              </p>
+            )}
             <div className="mt-4 space-y-2">
               {products.map((product) => (
                 <SidebarProduct key={product.id} product={product} />
@@ -367,7 +490,34 @@ export default function Design({ loaderData }: Route.ComponentProps) {
               {shape.points.length}-corner room, {Math.round(roomWidthCm)}cm ×{" "}
               {Math.round(roomDepthCm)}cm (top-down view)
             </p>
-            <div className="mb-2 h-8">
+            <div className="mb-2 flex h-8 items-center gap-2">
+              <button
+                type="button"
+                onClick={undo}
+                disabled={!canUndo}
+                title="Undo (Ctrl/Cmd+Z)"
+                className="rounded-full border border-stone-300 px-3 py-1 text-xs font-medium text-stone-700 hover:bg-stone-100 disabled:opacity-40 dark:border-stone-700 dark:text-stone-200 dark:hover:bg-stone-800"
+              >
+                ↶ Undo
+              </button>
+              <button
+                type="button"
+                onClick={redo}
+                disabled={!canRedo}
+                title="Redo (Ctrl/Cmd+Shift+Z)"
+                className="rounded-full border border-stone-300 px-3 py-1 text-xs font-medium text-stone-700 hover:bg-stone-100 disabled:opacity-40 dark:border-stone-700 dark:text-stone-200 dark:hover:bg-stone-800"
+              >
+                ↷ Redo
+              </button>
+              <button
+                type="button"
+                onClick={handleAutoFurnish}
+                disabled={products.length === 0}
+                title="Place one of each product automatically"
+                className="rounded-full border border-amber-700 px-3 py-1 text-xs font-medium text-amber-800 hover:bg-amber-50 disabled:opacity-40 dark:text-amber-300 dark:hover:bg-amber-950"
+              >
+                ✨ Furnish for me
+              </button>
               {notice && (
                 <div
                   role="status"
@@ -384,6 +534,7 @@ export default function Design({ loaderData }: Route.ComponentProps) {
               wallColor={wallColor}
               floorColor={floorColor}
               floorType={floorType}
+              guides={guides}
               points={shape.points}
               bounds={bounds}
               scale={scale}
@@ -505,6 +656,14 @@ function SidebarProduct({ product }: { product: ShopifyProduct }) {
         </div>
         <div className="text-xs text-stone-500 dark:text-stone-400">
           {product.price} {product.currencyCode}
+          {product.widthCm == null && (
+            <span
+              title="This product has no dimensions in Shopify, so a default size is used"
+              className="ml-1 text-amber-700 dark:text-amber-400"
+            >
+              · size estimated
+            </span>
+          )}
         </div>
       </div>
     </div>
@@ -568,6 +727,9 @@ function PlacedFurniture({
   function handleRotateStart(e: React.PointerEvent) {
     const el = elementRef.current;
     if (!el) return;
+
+    // One undo step for the whole turn (not one per pointer move)
+    useRoomStore.getState().checkpoint();
 
     const rect = el.getBoundingClientRect();
     const centerX = rect.left + rect.width / 2;
@@ -693,6 +855,7 @@ function RoomCanvas({
   wallColor,
   floorColor,
   floorType,
+  guides,
   points,
   bounds,
   scale,
@@ -704,6 +867,7 @@ function RoomCanvas({
   wallColor: string;
   floorColor: string;
   floorType: FloorId;
+  guides: { x: number | null; z: number | null };
   points: Array<{ x: number; z: number }>;
   bounds: { minX: number; minZ: number };
   scale: number;
@@ -748,6 +912,19 @@ function RoomCanvas({
         />
       </svg>
       <div className="absolute inset-0">{children}</div>
+      {/* Alignment guides (only while dragging, when something lines up) */}
+      {guides.x !== null && (
+        <div
+          className="pointer-events-none absolute top-0 bottom-0 w-px bg-sky-500"
+          style={{ left: guides.x * scale }}
+        />
+      )}
+      {guides.z !== null && (
+        <div
+          className="pointer-events-none absolute right-0 left-0 h-px bg-sky-500"
+          style={{ top: guides.z * scale }}
+        />
+      )}
     </div>
   );
 }

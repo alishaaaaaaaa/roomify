@@ -22,7 +22,8 @@
 // the server, and for a brief instant in the browser before JavaScript
 // finishes loading, we just show a simple loading message instead.
 
-import { Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { Component, Suspense, useEffect, useMemo, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import { Link } from "react-router";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import {
@@ -341,6 +342,25 @@ function placeholderColor(productId: string) {
   return `hsl(${hue}, 38%, ${light}%)`;
 }
 
+// If a 3D model file fails to load (bad link, deleted file, network
+// hiccup), show the plain placeholder box for that one item instead of
+// letting the error take down the whole 3D view.
+class ModelBoundary extends Component<
+  { fallback: ReactNode; children: ReactNode },
+  { failed: boolean }
+> {
+  state = { failed: false };
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+  componentDidCatch(error: unknown) {
+    console.warn("A 3D model failed to load; showing a box instead.", error);
+  }
+  render() {
+    return this.state.failed ? this.props.fallback : this.props.children;
+  }
+}
+
 // Works out this item's position and rotation (shared by both the real
 // model and the placeholder box below), then renders whichever one
 // applies. item.position.x/z is stored as the top-left corner of the
@@ -361,22 +381,11 @@ function PlacedFurnitureMesh({ item }: { item: PlacedItem }) {
   // that an item faces the same way in 3D as it did in the plan.
   const rotationYRadians = -(item.rotationY * Math.PI) / 180;
 
-  if (item.modelUrl) {
-    return (
-      <RealModel
-        item={item}
-        x={x}
-        z={z}
-        rotationYRadians={rotationYRadians}
-      />
-    );
-  }
-
   const itemWidthM = item.widthCm / 100;
   const itemHeightM = item.heightCm / 100;
   const itemDepthM = item.depthCm / 100;
 
-  return (
+  const box = (
     <RoundedBox
       args={[itemWidthM, itemHeightM, itemDepthM]}
       radius={Math.min(0.03, itemWidthM / 4, itemHeightM / 4, itemDepthM / 4)}
@@ -391,6 +400,19 @@ function PlacedFurnitureMesh({ item }: { item: PlacedItem }) {
         roughness={0.6}
       />
     </RoundedBox>
+  );
+
+  if (!item.modelUrl) return box;
+
+  return (
+    <ModelBoundary fallback={box}>
+      <RealModel
+        item={item}
+        x={x}
+        z={z}
+        rotationYRadians={rotationYRadians}
+      />
+    </ModelBoundary>
   );
 }
 

@@ -14,6 +14,7 @@ import {
 } from "~/components/FloorPattern";
 import { useRoomStore } from "~/store/roomStore";
 import type { RoomPoint } from "~/lib/geometry";
+import { ROOM_PRESETS, WALL_COLORS } from "~/lib/presets";
 import {
   FLOORING_OPTIONS,
   getFloorOption,
@@ -52,6 +53,7 @@ export default function RoomSetup() {
   const setWallColor = useRoomStore((state) => state.setWallColor);
   const setFloorType = useRoomStore((state) => state.setFloorType);
   const setFloorColor = useRoomStore((state) => state.setFloorColor);
+  const applyPreset = useRoomStore((state) => state.applyPreset);
 
   // The room preview is filled with the chosen flooring, drawn to the
   // same scale as the grid (so a 60cm tile looks 60cm wide).
@@ -276,6 +278,32 @@ export default function RoomSetup() {
             )}
 
             <div className="rounded-2xl border border-stone-200 bg-white p-4 shadow-sm dark:border-stone-800 dark:bg-stone-900">
+              <h2 className="text-xs font-semibold text-stone-500 dark:text-stone-400">
+                Or start from an example
+              </h2>
+              <div className="mt-2 grid grid-cols-2 gap-2">
+                {ROOM_PRESETS.map((preset) => (
+                  <button
+                    key={preset.id}
+                    type="button"
+                    onClick={() => {
+                      applyPreset(preset);
+                      setIsClosed(true);
+                    }}
+                    className="rounded-lg border border-stone-200 p-2 text-left hover:border-stone-400 dark:border-stone-700 dark:hover:border-stone-500"
+                  >
+                    <div className="text-xs font-medium text-stone-900 dark:text-stone-100">
+                      {preset.label}
+                    </div>
+                    <div className="text-[11px] text-stone-500 dark:text-stone-400">
+                      {preset.blurb}
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="rounded-2xl border border-stone-200 bg-white p-4 shadow-sm dark:border-stone-800 dark:bg-stone-900">
               <label className="block">
                 <span className="text-xs font-medium text-stone-500 dark:text-stone-400">
                   Ceiling height (cm)
@@ -296,6 +324,24 @@ export default function RoomSetup() {
                   value={wallColor}
                   onChange={setWallColor}
                 />
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {WALL_COLORS.map((c) => (
+                    <button
+                      key={c.value}
+                      type="button"
+                      title={c.label}
+                      aria-label={`Wall color: ${c.label}`}
+                      aria-pressed={wallColor.toLowerCase() === c.value}
+                      onClick={() => setWallColor(c.value)}
+                      style={{ backgroundColor: c.value }}
+                      className={`h-7 w-7 rounded-full border border-stone-300 dark:border-stone-600 ${
+                        wallColor.toLowerCase() === c.value
+                          ? "ring-2 ring-stone-900 ring-offset-2 dark:ring-stone-100 dark:ring-offset-stone-900"
+                          : ""
+                      }`}
+                    />
+                  ))}
+                </div>
               </div>
             </div>
 
