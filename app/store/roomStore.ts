@@ -70,6 +70,10 @@ type RoomState = {
   placedItems: PlacedItem[];
   // True once saved data has been loaded from the browser. Not saved.
   hasHydrated: boolean;
+  // Undo/redo for furniture changes. Each entry is a full copy of the
+  // placed items at some earlier moment. Not saved between visits.
+  past: PlacedItem[][];
+  future: PlacedItem[][];
   setShape: (shape: RoomShape) => void;
   setWallColor: (color: string) => void;
   setFloorType: (floorType: FloorId) => void;
@@ -83,12 +87,33 @@ type RoomState = {
   ) => void;
   removeItem: (id: string) => void;
   clearItems: () => void;
+  setItems: (items: PlacedItem[]) => void;
+  // Remember the current layout as an undo step (used once at the
+  // start of a drag-to-rotate, since rotating updates continuously).
+  checkpoint: () => void;
+  undo: () => void;
+  redo: () => void;
+  applyPreset: (preset: {
+    shape: RoomShape;
+    wallColor: string;
+    floorType: FloorId;
+  }) => void;
   syncWithCatalog: (catalog: ReadonlyArray<CatalogProduct>) => void;
   setHasHydrated: (value: boolean) => void;
 };
 
 // A default simple rectangle (400cm x 400cm) so the app isn't empty
 // before the user draws their own shape on the setup screen.
+const MAX_HISTORY = 100;
+
+// Adds the current items to the undo list (capped), clears redo.
+function withHistory(state: { placedItems: PlacedItem[]; past: PlacedItem[][] }) {
+  return {
+    past: [...state.past, state.placedItems].slice(-MAX_HISTORY),
+    future: [] as PlacedItem[][],
+  };
+}
+
 const DEFAULT_SHAPE: RoomShape = {
   points: [
     { x: 0, z: 0 },
@@ -108,6 +133,8 @@ export const useRoomStore = create<RoomState>()(
       floorColor: "#c9a876",
       placedItems: [],
       hasHydrated: false,
+      past: [],
+      future: [],
 
       setShape: (shape) => set({ shape }),
       setWallColor: (wallColor) => set({ wallColor }),
@@ -115,10 +142,14 @@ export const useRoomStore = create<RoomState>()(
       setFloorColor: (floorColor) => set({ floorColor }),
 
       addItem: (item) =>
-        set((state) => ({ placedItems: [...state.placedItems, item] })),
+        set((state) => ({
+          ...withHistory(state),
+          placedItems: [...state.placedItems, item],
+        })),
 
       updateItemPosition: (id, position) =>
         set((state) => ({
+          ...withHistory(state),
           placedItems: state.placedItems.map((item) =>
             item.id === id ? { ...item, position } : item
           ),
@@ -137,10 +168,55 @@ export const useRoomStore = create<RoomState>()(
 
       removeItem: (id) =>
         set((state) => ({
+          ...withHistory(state),
           placedItems: state.placedItems.filter((item) => item.id !== id),
         })),
 
-      clearItems: () => set({ placedItems: [] }),
+      clearItems: () =>
+        set((state) =>
+          state.placedItems.length === 0
+            ? state
+            : { ...withHistory(state), placedItems: [] }
+        ),
+
+      setItems: (items) =>
+        set((state) => ({ ...withHistory(state), placedItems: items })),
+
+      checkpoint: () => set((state) => withHistory(state)),
+
+      undo: () =>
+        set((state) => {
+          if (state.past.length === 0) return state;
+          const previous = state.past[state.past.length - 1];
+          return {
+            past: state.past.slice(0, -1),
+            future: [...state.future, state.placedItems],
+            placedItems: previous,
+          };
+        }),
+
+      redo: () =>
+        set((state) => {
+          if (state.future.length === 0) return state;
+          const next = state.future[state.future.length - 1];
+          return {
+            future: state.future.slice(0, -1),
+            past: [...state.past, state.placedItems],
+            placedItems: next,
+          };
+        }),
+
+      // Loads an example room. Furniture is cleared since it was placed
+      // for the old shape.
+      applyPreset: (preset) =>
+        set((state) => ({
+          shape: preset.shape,
+          wallColor: preset.wallColor,
+          floorType: preset.floorType,
+          placedItems: [],
+          past: state.placedItems.length ? [...state.past, state.placedItems] : state.past,
+          future: [],
+        })),
 
       // Since the room is saved, an item placed yesterday carries
       // yesterday's copy of its product details. This refreshes each
