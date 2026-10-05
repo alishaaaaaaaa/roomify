@@ -376,3 +376,162 @@ export function getWallSegments(points: RoomPoint[], thickness: number): WallSeg
   }
   return segments;
 }
+
+// --- Snapping ----------------------------------------------------------
+
+export type SnapResult = {
+  center: RoomPoint;
+  // Positions (cm) of the lines the item snapped to, for drawing guides
+  guideX: number | null;
+  guideZ: number | null;
+};
+
+// Nudges an item's center so its edges (or its middle) line up with
+// nearby things: the room's wall lines and corners, and the edges and
+// middles of other items. Only moves it if something is within
+// `thresholdCm`. X and Z are handled independently.
+export function snapCenter(args: {
+  center: RoomPoint;
+  widthCm: number;
+  depthCm: number;
+  rotationY: number;
+  others: PlacementItem[];
+  room: PlacementRoom;
+  thresholdCm?: number;
+}): SnapResult {
+  const { center, widthCm, depthCm, rotationY, others, room } = args;
+  const threshold = args.thresholdCm ?? 8;
+  const fp = getEffectiveFootprint(widthCm, depthCm, rotationY);
+
+  const targetsX: number[] = [0, room.widthCm];
+  const targetsZ: number[] = [0, room.depthCm];
+  for (const p of room.polygon) {
+    targetsX.push(p.x);
+    targetsZ.push(p.z);
+  }
+  for (const o of others) {
+    const ofp = getEffectiveFootprint(o.widthCm, o.depthCm, o.rotationY);
+    targetsX.push(o.position.x, o.position.x + ofp.width, o.position.x + ofp.width / 2);
+    targetsZ.push(o.position.z, o.position.z + ofp.depth, o.position.z + ofp.depth / 2);
+  }
+
+  function best(
+    centerValue: number,
+    half: number,
+    targets: number[]
+  ): { value: number; guide: number } | null {
+    // The item's min edge, middle and max edge
+    const features = [centerValue - half, centerValue, centerValue + half];
+    let bestDelta: number | null = null;
+    let guide = 0;
+    for (const f of features) {
+      for (const t of targets) {
+        const delta = t - f;
+        if (
+          Math.abs(delta) <= threshold &&
+          (bestDelta === null || Math.abs(delta) < Math.abs(bestDelta))
+        ) {
+          bestDelta = delta;
+          guide = t;
+        }
+      }
+    }
+    return bestDelta === null ? null : { value: centerValue + bestDelta, guide };
+  }
+
+  const sx = best(center.x, fp.width / 2, targetsX);
+  const sz = best(center.z, fp.depth / 2, targetsZ);
+  return {
+    center: { x: sx ? sx.value : center.x, z: sz ? sz.value : center.z },
+    guideX: sx ? sx.guide : null,
+    guideZ: sz ? sz.guide : null,
+  };
+}
+
+// --- Auto-furnish ------------------------------------------------------
+
+// Finds a spot for each item (largest first), preferring places up
+// against the walls, leaving a small gap between things. Returns the
+// centers it found; items with no room are left out.
+export function autoPlace(args: {
+  items: Array<{ key: string; widthCm: number; depthCm: number }>;
+  room: PlacementRoom;
+  existing?: PlacementItem[];
+  gapCm?: number;
+}): Map<string, RoomPoint> {
+  const { room } = args;
+  const gap = args.gapCm ?? 15;
+  const placed: PlacementItem[] = [...(args.existing ?? [])];
+  const result = new Map<string, RoomPoint>();
+
+  // Candidate centers on a 20cm grid, those nearest a wall first
+  const step = 20;
+  const candidates: RoomPoint[] = [];
+  for (let x = 0; x <= room.widthCm; x += step) {
+    for (let z = 0; z <= room.depthCm; z += step) {
+      if (isPointInPolygon({ x, z }, room.polygon)) candidates.push({ x, z });
+    }
+  }
+
+  function wallDistance(p: RoomPoint) {
+    let min = Infinity;
+    const poly = room.polygon;
+    for (let i = 0; i < poly.length; i++) {
+      const a = poly[i];
+      const b = poly[(i + 1) % poly.length];
+      const dx = b.x - a.x;
+      const dz = b.z - a.z;
+      const len2 = dx * dx + dz * dz || 1;
+      const t = clampNumber(((p.x - a.x) * dx + (p.z - a.z) * dz) / len2, 0, 1);
+      min = Math.min(min, Math.hypot(p.x - (a.x + t * dx), p.z - (a.z + t * dz)));
+    }
+    return min;
+  }
+
+  const sorted = [...args.items].sort(
+    (a, b) => b.widthCm * b.depthCm - a.widthCm * a.depthCm
+  );
+
+  sorted.forEach((item, index) => {
+    const ordered = candidates
+      .map((c) => ({
+        c,
+        // distance from the item's nearest side to the wall
+        score: Math.abs(wallDistance(c) - Math.min(item.widthCm, item.depthCm) / 2),
+        // a little variety so items spread around rather than stacking
+        // up in one corner
+        spread: ((c.x * 13 + c.z * 7 + index * 97) % 40) / 40,
+      }))
+      .sort((a, b) => a.score + a.spread * 40 - (b.score + b.spread * 40));
+
+    for (const { c } of ordered) {
+      const check = checkPlacement({
+        center: c,
+        widthCm: item.widthCm,
+        depthCm: item.depthCm,
+        rotationY: 0,
+        others: placed.map((o) => ({
+          ...o,
+          // inflate neighbours (around their middle) to leave a gap
+          widthCm: o.widthCm + gap,
+          depthCm: o.depthCm + gap,
+          position: { x: o.position.x - gap / 2, z: o.position.z - gap / 2 },
+        })),
+        room,
+      });
+      if (check.ok) {
+        result.set(item.key, c);
+        placed.push({
+          id: item.key,
+          widthCm: item.widthCm,
+          depthCm: item.depthCm,
+          rotationY: 0,
+          position: { x: c.x - item.widthCm / 2, z: c.z - item.depthCm / 2 },
+        });
+        break;
+      }
+    }
+  });
+
+  return result;
+}
