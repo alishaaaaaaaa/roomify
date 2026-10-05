@@ -19,7 +19,7 @@
 // color, a drag transform), which Tailwind's static classes can't
 // express.
 
-import { useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Form, Link, redirect } from "react-router";
 import {
   DndContext,
@@ -35,10 +35,13 @@ import {
 import { StepNav } from "~/components/StepNav";
 import { useRoomStore, type PlacedItem } from "~/store/roomStore";
 import {
+  checkPlacement,
+  findValidCenter,
   getEffectiveFootprint,
   getPolygonBounds,
-  isPointInPolygon,
 } from "~/lib/geometry";
+import { FloorPatternDefs, useFloorPaint } from "~/components/FloorPattern";
+import type { FloorId } from "~/lib/flooring";
 import type { Route } from "./+types/design";
 
 const MAX_CANVAS_PX = 640;
@@ -89,6 +92,10 @@ export default function Design({ loaderData }: Route.ComponentProps) {
   const shape = useRoomStore((state) => state.shape);
   const wallColor = useRoomStore((state) => state.wallColor);
   const floorColor = useRoomStore((state) => state.floorColor);
+  const floorType = useRoomStore((state) => state.floorType);
+  const hasHydrated = useRoomStore((state) => state.hasHydrated);
+  const syncWithCatalog = useRoomStore((state) => state.syncWithCatalog);
+  const clearItems = useRoomStore((state) => state.clearItems);
   const placedItems = useRoomStore((state) => state.placedItems);
   const addItem = useRoomStore((state) => state.addItem);
   const updateItemPosition = useRoomStore((state) => state.updateItemPosition);
@@ -96,10 +103,27 @@ export default function Design({ loaderData }: Route.ComponentProps) {
 
   const canvasRef = useRef<HTMLDivElement | null>(null);
 
-  // The room can be any shape now, so there's no single "width" and
-  // "length" anymore - instead we find the smallest rectangle that
-  // fully contains the shape, and scale/position everything relative
-  // to THAT rectangle's top-left corner.
+  // Because the room is saved in the browser, items placed in an earlier
+  // visit carry old product details. Once the saved room has loaded,
+  // refresh them from the live Shopify list (new prices, newly uploaded
+  // 3D models...).
+  useEffect(() => {
+    if (hasHydrated) syncWithCatalog(products);
+  }, [hasHydrated, products, syncWithCatalog]);
+
+  // A short message ("Can't place that there") that fades after a moment.
+  const [notice, setNotice] = useState<string | null>(null);
+  const noticeTimer = useRef<number | undefined>(undefined);
+  function showNotice(message: string) {
+    setNotice(message);
+    window.clearTimeout(noticeTimer.current);
+    noticeTimer.current = window.setTimeout(() => setNotice(null), 2500);
+  }
+  useEffect(() => () => window.clearTimeout(noticeTimer.current), []);
+
+  // The room can be any shape, so there's no single "width" and "length" -
+  // we find the smallest rectangle containing the shape, and scale/position
+  // everything relative to THAT rectangle's top-left corner.
   const bounds = getPolygonBounds(shape.points);
   const roomWidthCm = bounds.maxX - bounds.minX;
   const roomDepthCm = bounds.maxZ - bounds.minZ;
@@ -108,11 +132,38 @@ export default function Design({ loaderData }: Route.ComponentProps) {
   const canvasWidthPx = roomWidthCm * scale;
   const canvasHeightPx = roomDepthCm * scale;
 
+  // The overlap/boundary checks work in "canvas" coordinates (0,0 = top-left
+  // of the bounding box), same as item positions.
+  const room = {
+    polygon: shape.points.map((p) => ({
+      x: p.x - bounds.minX,
+      z: p.z - bounds.minZ,
+    })),
+    widthCm: roomWidthCm,
+    depthCm: roomDepthCm,
+  };
+
   const cartTotal = placedItems.reduce(
     (sum, item) => sum + Number(item.price),
     0
   );
   const currencyCode = placedItems[0]?.currencyCode ?? "USD";
+
+  function explainFailure(
+    result: { reason: "outside" | "overlap"; blockedBy?: string },
+    others: PlacedItem[]
+  ) {
+    if (result.reason === "outside") {
+      showNotice("That would be outside the room.");
+      return;
+    }
+    const blocker = others.find((o) => o.id === result.blockedBy);
+    showNotice(
+      blocker
+        ? `No free space there - it would overlap ${blocker.title}.`
+        : "No free space there."
+    );
+  }
 
   function handleDragEnd(event: DragEndEvent) {
     const canvasEl = canvasRef.current;
@@ -123,16 +174,17 @@ export default function Design({ loaderData }: Route.ComponentProps) {
 
     const canvasRect = canvasEl.getBoundingClientRect();
 
-    // event.activatorEvent is the original pointer-down event, which has
-    // where the drag started; event.delta is how far the pointer moved.
-    // Adding them gives us where the pointer ended up.
+    // event.activatorEvent is the original pointer-down event; event.delta
+    // is how far the pointer moved. Together: where the pointer ended up.
     const activatorEvent = event.activatorEvent as PointerEvent;
     const finalClientX = activatorEvent.clientX + event.delta.x;
     const finalClientY = activatorEvent.clientY + event.delta.y;
 
-    // Position relative to the canvas's top-left corner, in cm
-    const dropXCm = (finalClientX - canvasRect.left) / scale;
-    const dropZCm = (finalClientY - canvasRect.top) / scale;
+    // Where it was dropped, in cm from the canvas's top-left corner
+    const desired = {
+      x: (finalClientX - canvasRect.left) / scale,
+      z: (finalClientY - canvasRect.top) / scale,
+    };
 
     const activeId = String(event.active.id);
 
@@ -146,24 +198,20 @@ export default function Design({ loaderData }: Route.ComponentProps) {
       const depthCm = product.depthCm ?? 60;
       const heightCm = product.heightCm ?? 80;
 
-      const position = {
-        x: clamp(dropXCm - widthCm / 2, 0, roomWidthCm - widthCm),
-        y: 0,
-        z: clamp(dropZCm - depthCm / 2, 0, roomDepthCm - depthCm),
-      };
-
-      // The canvas is scaled to the room's BOUNDING BOX, but the room's
-      // actual shape can be smaller than that box (think of an L-shape:
-      // its bounding box is a full rectangle, but the missing corner
-      // isn't really part of the room). So before placing anything, we
-      // check the item's center point against the real polygon, not
-      // just the rectangle - this is exactly why non-rectangular rooms
-      // need real point-in-polygon math, not just min/max clamping.
-      const centerInRoomCoords = {
-        x: bounds.minX + position.x + widthCm / 2,
-        z: bounds.minZ + position.z + depthCm / 2,
-      };
-      if (!isPointInPolygon(centerInRoomCoords, shape.points)) return;
+      // If the drop spot is taken, slide it to the nearest free spot
+      // (within a short distance); otherwise refuse and say why.
+      const result = findValidCenter({
+        desired,
+        widthCm,
+        depthCm,
+        rotationY: 0,
+        others: placedItems,
+        room,
+      });
+      if (!result.ok) {
+        explainFailure(result, placedItems);
+        return;
+      }
 
       addItem({
         id: crypto.randomUUID(),
@@ -177,7 +225,11 @@ export default function Design({ loaderData }: Route.ComponentProps) {
         widthCm,
         heightCm,
         depthCm,
-        position,
+        position: {
+          x: result.center.x - widthCm / 2,
+          y: 0,
+          z: result.center.z - depthCm / 2,
+        },
         rotationY: 0,
       });
     } else if (activeId.startsWith("placed-")) {
@@ -186,59 +238,100 @@ export default function Design({ loaderData }: Route.ComponentProps) {
       const item = placedItems.find((i) => i.id === itemId);
       if (!item) return;
 
-      // Use the item's CURRENT rotation to know its real on-the-ground
-      // footprint right now - a sofa rotated 90 degrees needs its
-      // swapped width/depth here, not its original ones.
+      // It mustn't collide with itself, so it's left out of "others".
+      const others = placedItems.filter((i) => i.id !== itemId);
+      const result = findValidCenter({
+        desired,
+        widthCm: item.widthCm,
+        depthCm: item.depthCm,
+        rotationY: item.rotationY,
+        others,
+        room,
+      });
+      if (!result.ok) {
+        explainFailure(result, others);
+        return;
+      }
+
       const footprint = getEffectiveFootprint(
         item.widthCm,
         item.depthCm,
         item.rotationY
       );
-
-      const position = {
-        x: clamp(dropXCm - footprint.width / 2, 0, roomWidthCm - footprint.width),
+      updateItemPosition(itemId, {
+        x: result.center.x - footprint.width / 2,
         y: 0,
-        z: clamp(dropZCm - footprint.depth / 2, 0, roomDepthCm - footprint.depth),
-      };
-
-      const centerInRoomCoords = {
-        x: bounds.minX + position.x + footprint.width / 2,
-        z: bounds.minZ + position.z + footprint.depth / 2,
-      };
-      if (!isPointInPolygon(centerInRoomCoords, shape.points)) return;
-
-      updateItemPosition(itemId, position);
+        z: result.center.z - footprint.depth / 2,
+      });
     }
   }
 
-  // Rotates an item to any angle the user drags it to (see the rotate
-  // handle in PlacedFurniture, which calls this continuously while
-  // dragging). We keep the item's CENTER fixed rather than its
-  // top-left corner - otherwise the item would visibly drift sideways
-  // as it turns, since a rotated rectangle's bounding box keeps
-  // changing size and "top-left corner" doesn't point at a stable spot.
+  // Rotates an item to any angle (called continuously while the rotate
+  // handle is dragged). The CENTER stays fixed so the item turns in place.
+  // A turn that would swing it into a wall or another item is simply not
+  // applied, so it stops at the obstacle - unless it was already in an
+  // invalid spot, in which case it's allowed to turn (so it can't get stuck).
   function handleRotate(item: PlacedItem, nextRotationY: number) {
+    // Always read the freshest copy: this runs on many pointer events
+    // in a row, and `item` may be from an older render.
+    const current =
+      useRoomStore.getState().placedItems.find((i) => i.id === item.id) ?? item;
+
     const currentFootprint = getEffectiveFootprint(
-      item.widthCm,
-      item.depthCm,
-      item.rotationY
+      current.widthCm,
+      current.depthCm,
+      current.rotationY
     );
-    const centerX = item.position.x + currentFootprint.width / 2;
-    const centerZ = item.position.z + currentFootprint.depth / 2;
+    const center = {
+      x: current.position.x + currentFootprint.width / 2,
+      z: current.position.z + currentFootprint.depth / 2,
+    };
+    const others = useRoomStore
+      .getState()
+      .placedItems.filter((i) => i.id !== current.id);
 
     const nextFootprint = getEffectiveFootprint(
-      item.widthCm,
-      item.depthCm,
+      current.widthCm,
+      current.depthCm,
       nextRotationY
     );
-
-    const position = {
-      x: clamp(centerX - nextFootprint.width / 2, 0, roomWidthCm - nextFootprint.width),
-      y: 0,
-      z: clamp(centerZ - nextFootprint.depth / 2, 0, roomDepthCm - nextFootprint.depth),
+    const clampedCenter = {
+      x: clamp(center.x, nextFootprint.width / 2, roomWidthCm - nextFootprint.width / 2),
+      z: clamp(center.z, nextFootprint.depth / 2, roomDepthCm - nextFootprint.depth / 2),
     };
 
-    updateItemPlacement(item.id, position, nextRotationY);
+    const next = checkPlacement({
+      center: clampedCenter,
+      widthCm: current.widthCm,
+      depthCm: current.depthCm,
+      rotationY: nextRotationY,
+      others,
+      room,
+    });
+    if (!next.ok) {
+      const wasValid = checkPlacement({
+        center,
+        widthCm: current.widthCm,
+        depthCm: current.depthCm,
+        rotationY: current.rotationY,
+        others,
+        room,
+      }).ok;
+      if (wasValid) {
+        explainFailure(next, others);
+        return;
+      }
+    }
+
+    updateItemPlacement(
+      current.id,
+      {
+        x: clampedCenter.x - nextFootprint.width / 2,
+        y: 0,
+        z: clampedCenter.z - nextFootprint.depth / 2,
+      },
+      nextRotationY
+    );
   }
 
   return (
@@ -274,12 +367,23 @@ export default function Design({ loaderData }: Route.ComponentProps) {
               {shape.points.length}-corner room, {Math.round(roomWidthCm)}cm ×{" "}
               {Math.round(roomDepthCm)}cm (top-down view)
             </p>
+            <div className="mb-2 h-8">
+              {notice && (
+                <div
+                  role="status"
+                  className="inline-block rounded-full bg-amber-100 px-3 py-1.5 text-xs font-medium text-amber-900 shadow-sm dark:bg-amber-900/60 dark:text-amber-100"
+                >
+                  {notice}
+                </div>
+              )}
+            </div>
             <RoomCanvas
               canvasRef={canvasRef}
               widthPx={canvasWidthPx}
               heightPx={canvasHeightPx}
               wallColor={wallColor}
               floorColor={floorColor}
+              floorType={floorType}
               points={shape.points}
               bounds={bounds}
               scale={scale}
@@ -310,6 +414,20 @@ export default function Design({ loaderData }: Route.ComponentProps) {
                   {currencyCode}
                 </span>
               </p>
+
+              {placedItems.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (window.confirm("Remove all furniture from this room?")) {
+                      clearItems();
+                    }
+                  }}
+                  className="mt-2 text-xs font-medium text-stone-500 underline hover:text-stone-900 dark:text-stone-400 dark:hover:text-stone-100"
+                >
+                  Clear room
+                </button>
+              )}
 
               <Link
                 to="/walkthrough"
@@ -574,6 +692,7 @@ function RoomCanvas({
   heightPx,
   wallColor,
   floorColor,
+  floorType,
   points,
   bounds,
   scale,
@@ -584,12 +703,14 @@ function RoomCanvas({
   heightPx: number;
   wallColor: string;
   floorColor: string;
+  floorType: FloorId;
   points: Array<{ x: number; z: number }>;
   bounds: { minX: number; minZ: number };
   scale: number;
   children: React.ReactNode;
 }) {
   const { setNodeRef } = useDroppable({ id: "room-canvas" });
+  const floorPaint = useFloorPaint(floorType, floorColor, "room-floor");
 
   // The room's shape is drawn as an SVG polygon, positioned relative to
   // the bounding box's top-left corner (so the shape sits flush inside
@@ -613,9 +734,14 @@ function RoomCanvas({
         height={heightPx}
         className="absolute inset-0 rounded-sm shadow-inner"
       >
+        <FloorPatternDefs
+          patternId="room-floor"
+          url={floorPaint.url}
+          pxPerCm={scale}
+        />
         <polygon
           points={polygonPoints}
-          fill={floorColor}
+          fill={floorPaint.fill}
           stroke={wallColor}
           strokeWidth={12}
           strokeLinejoin="round"

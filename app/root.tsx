@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import {
   isRouteErrorResponse,
   Links,
@@ -8,6 +9,7 @@ import {
 } from "react-router";
 
 import type { Route } from "./+types/root";
+import { useRoomStore } from "~/store/roomStore";
 import "./app.css";
 
 export const links: Route.LinksFunction = () => [
@@ -42,6 +44,13 @@ export function Layout({ children }: { children: React.ReactNode }) {
 }
 
 export default function App() {
+  // Loads the saved room (shape, flooring, placed furniture...) from this
+  // browser. It has to wait until the page has loaded rather than
+  // happening automatically - see `skipHydration` in roomStore.ts for why.
+  useEffect(() => {
+    useRoomStore.persist.rehydrate();
+  }, []);
+
   return <Outlet />;
 }
 

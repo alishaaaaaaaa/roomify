@@ -7,8 +7,20 @@
 import { useRef, useState } from "react";
 import { useNavigate } from "react-router";
 import { StepNav } from "~/components/StepNav";
+import {
+  FloorPatternDefs,
+  useFloorPaint,
+  useFloorTextureUrl,
+} from "~/components/FloorPattern";
 import { useRoomStore } from "~/store/roomStore";
 import type { RoomPoint } from "~/lib/geometry";
+import {
+  FLOORING_OPTIONS,
+  getFloorOption,
+  type FloorGroup,
+  type FloorId,
+  type FloorOption,
+} from "~/lib/flooring";
 
 // The drawing canvas represents an 800cm x 800cm (8m x 8m) working
 // area - generous for most rooms - mapped onto a fixed-size on-screen
@@ -34,10 +46,16 @@ export default function RoomSetup() {
 
   const shape = useRoomStore((state) => state.shape);
   const wallColor = useRoomStore((state) => state.wallColor);
+  const floorType = useRoomStore((state) => state.floorType);
   const floorColor = useRoomStore((state) => state.floorColor);
   const setShape = useRoomStore((state) => state.setShape);
   const setWallColor = useRoomStore((state) => state.setWallColor);
+  const setFloorType = useRoomStore((state) => state.setFloorType);
   const setFloorColor = useRoomStore((state) => state.setFloorColor);
+
+  // The room preview is filled with the chosen flooring, drawn to the
+  // same scale as the grid (so a 60cm tile looks 60cm wide).
+  const floorPaint = useFloorPaint(floorType, floorColor, "setup-floor");
 
   // Whether the shape is "finished" (a closed polygon you can drag
   // corners of) or still being drawn (an open line you're adding points
@@ -108,6 +126,12 @@ export default function RoomSetup() {
               className="rounded-2xl border border-stone-200 bg-white shadow-sm dark:border-stone-800 dark:bg-stone-900"
               style={{ cursor: isClosed ? "default" : "crosshair" }}
             >
+              <FloorPatternDefs
+                patternId="setup-floor"
+                url={floorPaint.url}
+                pxPerCm={SCALE}
+              />
+
               {/* Reference grid, every 50cm, purely visual */}
               {Array.from({ length: GRID_CM / 50 + 1 }, (_, i) => i * 50).map(
                 (cm) => (
@@ -140,7 +164,7 @@ export default function RoomSetup() {
                     points={shape.points
                       .map((p) => `${p.x * SCALE},${p.z * SCALE}`)
                       .join(" ")}
-                    fill={floorColor}
+                    fill={floorPaint.fill}
                     stroke={wallColor}
                     strokeWidth={10}
                     strokeLinejoin="round"
@@ -266,18 +290,34 @@ export default function RoomSetup() {
                 />
               </label>
 
-              <div className="mt-4 grid grid-cols-2 gap-4">
+              <div className="mt-4">
                 <ColorField
                   label="Wall color"
                   value={wallColor}
                   onChange={setWallColor}
                 />
-                <ColorField
-                  label="Floor color"
-                  value={floorColor}
-                  onChange={setFloorColor}
-                />
               </div>
+            </div>
+
+            <div className="rounded-2xl border border-stone-200 bg-white p-4 shadow-sm dark:border-stone-800 dark:bg-stone-900">
+              <h2 className="text-xs font-semibold text-stone-500 dark:text-stone-400">
+                Flooring
+              </h2>
+              <p className="mt-1 text-xs text-stone-500 dark:text-stone-400">
+                {floorType === "custom"
+                  ? "Custom color"
+                  : `${getFloorOption(floorType).group}: ${getFloorOption(floorType).label}`}
+              </p>
+              <FloorChooser value={floorType} onChange={setFloorType} />
+              {floorType === "custom" && (
+                <div className="mt-4">
+                  <ColorField
+                    label="Floor color"
+                    value={floorColor}
+                    onChange={setFloorColor}
+                  />
+                </div>
+              )}
             </div>
 
             <button
@@ -338,6 +378,104 @@ function CornerHandle({
       onPointerMove={handlePointerMove}
       style={{ cursor: draggable ? "grab" : "default" }}
     />
+  );
+}
+
+const FLOOR_GROUP_ORDER: FloorGroup[] = ["Tile", "Hardwood", "Concrete", "Custom"];
+
+// The flooring picker: a swatch for every option, grouped by material.
+// Each swatch shows a small piece of the real painted floor.
+function FloorChooser({
+  value,
+  onChange,
+}: {
+  value: FloorId;
+  onChange: (id: FloorId) => void;
+}) {
+  const floorColor = useRoomStore((state) => state.floorColor);
+
+  return (
+    <div className="mt-3 space-y-3">
+      {FLOOR_GROUP_ORDER.map((group) => {
+        const options = FLOORING_OPTIONS.filter((o) => o.group === group);
+        if (options.length === 0) return null;
+        return (
+          <div key={group}>
+            <div className="text-[11px] font-medium uppercase tracking-wide text-stone-400">
+              {group}
+            </div>
+            <div className="mt-1.5 flex flex-wrap gap-3">
+              {options.map((option) => (
+                <FloorSwatch
+                  key={option.id}
+                  option={option}
+                  selected={option.id === value}
+                  customColor={floorColor}
+                  onSelect={() => onChange(option.id)}
+                />
+              ))}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function FloorSwatch({
+  option,
+  selected,
+  customColor,
+  onSelect,
+}: {
+  option: FloorOption;
+  selected: boolean;
+  customColor: string;
+  onSelect: () => void;
+}) {
+  const url = useFloorTextureUrl(option.id);
+
+  // A swatch shows the painted floor at about 0.8 pixels per cm, so a
+  // 60cm tile or a 12cm plank is easy to make out.
+  const style =
+    option.id === "custom"
+      ? { backgroundColor: customColor }
+      : url
+        ? {
+            backgroundColor: option.baseColor,
+            backgroundImage: `url(${url})`,
+            backgroundSize: "192px 192px",
+          }
+        : { backgroundColor: option.baseColor };
+
+  return (
+    <button
+      type="button"
+      onClick={onSelect}
+      aria-pressed={selected}
+      title={`${option.group}: ${option.label}`}
+      className="flex w-[76px] flex-col items-center gap-1 text-center"
+    >
+      <span
+        style={style}
+        className={
+          "block h-[76px] w-[76px] rounded-lg border-2 transition-shadow " +
+          (selected
+            ? "border-stone-900 shadow-md dark:border-stone-100"
+            : "border-white ring-1 ring-stone-300 hover:ring-stone-500 dark:border-stone-900 dark:ring-stone-700")
+        }
+      />
+      <span
+        className={
+          "text-[11px] leading-tight " +
+          (selected
+            ? "font-semibold text-stone-900 dark:text-stone-100"
+            : "text-stone-600 dark:text-stone-400")
+        }
+      >
+        {option.label}
+      </span>
+    </button>
   );
 }
 

@@ -9,6 +9,9 @@
 //    correctly fills in even a concave shape like an L, unlike a naive
 //    "fan of triangles from the center" approach which breaks on
 //    concave shapes)
+//  - a textured floor (tile / hardwood / concrete), soft shadows, a light
+//    studio environment, baseboards and walls that fade when they block
+//    the camera
 //  - one wall PER EDGE of the polygon, each individually positioned and
 //    rotated to sit exactly along that edge - this is what makes
 //    arbitrary bends and angles in a room actually show up in 3D
@@ -19,14 +22,44 @@
 // the server, and for a brief instant in the browser before JavaScript
 // finishes loading, we just show a simple loading message instead.
 
-import { Suspense, useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router";
-import { Canvas } from "@react-three/fiber";
-import { OrbitControls, useGLTF } from "@react-three/drei";
-import { Box3, DoubleSide, Shape, Vector3 } from "three";
+import { Canvas, useFrame, useThree } from "@react-three/fiber";
+import {
+  Environment,
+  Lightformer,
+  OrbitControls,
+  RoundedBox,
+  useGLTF,
+} from "@react-three/drei";
+import {
+  Box3,
+  CanvasTexture,
+  DoubleSide,
+  MathUtils,
+  Mesh,
+  MeshStandardMaterial,
+  RepeatWrapping,
+  Shape,
+  SRGBColorSpace,
+  Vector3,
+} from "three";
 import { StepNav } from "~/components/StepNav";
 import { useRoomStore, type PlacedItem } from "~/store/roomStore";
-import { getEffectiveFootprint, getPolygonBounds } from "~/lib/geometry";
+import {
+  getEffectiveFootprint,
+  getPolygonBounds,
+  getWallSegments,
+} from "~/lib/geometry";
+import {
+  FLOOR_PERIOD_CM,
+  getFloorOption,
+  paintFloorCanvas,
+  type FloorId,
+} from "~/lib/flooring";
+
+const WALL_THICKNESS_M = 0.1;
+const BASEBOARD_HEIGHT_M = 0.09;
 
 export default function Walkthrough() {
   const [mounted, setMounted] = useState(false);
@@ -35,42 +68,43 @@ export default function Walkthrough() {
   const shape = useRoomStore((state) => state.shape);
   const wallColor = useRoomStore((state) => state.wallColor);
   const floorColor = useRoomStore((state) => state.floorColor);
+  const floorType = useRoomStore((state) => state.floorType);
   const placedItems = useRoomStore((state) => state.placedItems);
 
-  // Same idea as the 2D floor plan: find the room's bounding box, and
-  // work in coordinates relative to its top-left corner (in meters,
-  // since Three.js scenes conventionally use meters, not centimeters).
+  // Same idea as the 2D floor plan: work in coordinates relative to the
+  // room's bounding-box corner, in meters (three.js convention).
   const bounds = getPolygonBounds(shape.points);
   const roomWidthM = (bounds.maxX - bounds.minX) / 100;
   const roomDepthM = (bounds.maxZ - bounds.minZ) / 100;
   const heightM = shape.heightCm / 100;
 
-  // Points shifted to be relative to the bounding box, then converted
-  // to meters - this is the exact same coordinate frame the placed
-  // items already use, so everything lines up without extra math.
-  const localPointsM = shape.points.map((p) => ({
-    x: (p.x - bounds.minX) / 100,
-    z: (p.z - bounds.minZ) / 100,
-  }));
+  // Memoized so these only rebuild when the room's shape changes.
+  const localPointsM = useMemo(
+    () =>
+      shape.points.map((p) => ({
+        x: (p.x - bounds.minX) / 100,
+        z: (p.z - bounds.minZ) / 100,
+      })),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [shape.points]
+  );
 
-  // Building the floor shape is memoized since it only needs to be
-  // recomputed when the room's actual shape changes, not on every
-  // render (e.g. not while furniture is being dragged around).
   const floorShape = useMemo(() => {
     const s = new Shape();
-    // A Shape lives in its own local 2D (x, y) plane. We negate z here
-    // so that after rotating the mesh flat (-90 degrees around X), the
-    // shape lands with the correct, non-mirrored orientation in world
-    // space - verified by working through the rotation math by hand
-    // rather than eyeballing it, since a flipped floor is an easy
-    // mistake that only becomes obvious on a non-symmetric room shape.
+    // A Shape lives in its own 2D (x, y) plane; z is negated so that
+    // after the mesh is laid flat (-90deg around X) it isn't mirrored.
     s.moveTo(localPointsM[0].x, -localPointsM[0].z);
-    for (const p of localPointsM.slice(1)) {
-      s.lineTo(p.x, -p.z);
-    }
+    for (const p of localPointsM.slice(1)) s.lineTo(p.x, -p.z);
     s.closePath();
     return s;
   }, [localPointsM]);
+
+  const walls = useMemo(
+    () => getWallSegments(localPointsM, WALL_THICKNESS_M),
+    [localPointsM]
+  );
+
+  const maxDim = Math.max(roomWidthM, roomDepthM);
 
   return (
     <div className="min-h-screen bg-stone-50 dark:bg-stone-950">
@@ -88,78 +122,113 @@ export default function Walkthrough() {
       <div className="mx-auto h-[70vh] max-w-6xl overflow-hidden rounded-2xl bg-stone-800 px-0 shadow-inner sm:mx-6">
         {mounted ? (
           <Canvas
+            // Re-created if the room's size changes so the camera starts
+            // in a sensible spot for the new room.
+            key={`${roomWidthM.toFixed(2)}x${roomDepthM.toFixed(2)}`}
+            shadows
+            dpr={[1, 2]}
             camera={{
-              position: [roomWidthM * 1.4, heightM * 1.8, roomDepthM * 1.6],
-              fov: 50,
+              position: [
+                roomWidthM / 2 + maxDim * 0.9,
+                heightM + maxDim * 0.8,
+                roomDepthM / 2 + maxDim * 1.1,
+              ],
+              fov: 45,
             }}
           >
-            <ambientLight intensity={0.6} />
-            <directionalLight position={[5, 8, 5]} intensity={0.8} />
+            <color attach="background" args={["#d9d4cc"]} />
 
-            {/* Floor - a real polygon, correctly filled even for a
-                concave shape like an L-shaped room */}
-            <mesh rotation={[-Math.PI / 2, 0, 0]}>
-              <shapeGeometry args={[floorShape]} />
-              <meshStandardMaterial color={floorColor} side={DoubleSide} />
-            </mesh>
+            {/* Soft studio-style reflections, built from a few light
+                panels (no image download needed) */}
+            <Environment resolution={256} environmentIntensity={0.55}>
+              <Lightformer
+                form="rect"
+                intensity={2}
+                position={[0, 5, 0]}
+                rotation-x={Math.PI / 2}
+                scale={[10, 10, 1]}
+              />
+              <Lightformer
+                form="rect"
+                intensity={1.2}
+                position={[-6, 2, 2]}
+                rotation-y={Math.PI / 2}
+                scale={[8, 4, 1]}
+              />
+              <Lightformer
+                form="rect"
+                intensity={0.8}
+                position={[6, 2, -2]}
+                rotation-y={-Math.PI / 2}
+                scale={[8, 4, 1]}
+              />
+            </Environment>
 
-            {/* One wall per edge of the room's polygon. Walls are drawn
-                slightly see-through (rather than picking one "front"
-                wall to omit, like a plain rectangle can) since an
-                arbitrary polygon has no single obvious "front" - this
-                way you can always see and orbit around inside the room
-                no matter its shape. */}
-            {localPointsM.map((a, i) => {
-              const b = localPointsM[(i + 1) % localPointsM.length];
-              const dx = b.x - a.x;
-              const dz = b.z - a.z;
-              const length = Math.hypot(dx, dz);
-              const midX = (a.x + b.x) / 2;
-              const midZ = (a.z + b.z) / 2;
-              // Rotates the wall so its width runs along this edge -
-              // derived from how Three.js's Y-axis rotation maps a
-              // plane's local X onto the world X/Z plane, then checked
-              // against simple axis-aligned edges by hand.
-              const angleY = Math.atan2(-dz, dx);
+            <hemisphereLight args={["#ffffff", "#b8aa98", 0.5]} />
+            <directionalLight
+              castShadow
+              position={[
+                roomWidthM / 2 + maxDim * 0.6,
+                heightM * 2.2,
+                roomDepthM / 2 + maxDim * 0.4,
+              ]}
+              target-position={[roomWidthM / 2, 0, roomDepthM / 2]}
+              intensity={1.6}
+              shadow-mapSize={[2048, 2048]}
+              shadow-bias={-0.0004}
+              shadow-normalBias={0.02}
+              shadow-camera-left={-maxDim}
+              shadow-camera-right={maxDim}
+              shadow-camera-top={maxDim}
+              shadow-camera-bottom={-maxDim}
+              shadow-camera-near={0.5}
+              shadow-camera-far={maxDim * 6 + heightM * 4}
+            />
 
-              return (
-                <mesh
-                  key={i}
-                  position={[midX, heightM / 2, midZ]}
-                  rotation={[0, angleY, 0]}
-                >
-                  <planeGeometry args={[length, heightM]} />
-                  <meshStandardMaterial
-                    color={wallColor}
-                    side={DoubleSide}
-                    transparent
-                    opacity={0.85}
-                  />
-                </mesh>
-              );
-            })}
+            <Floor
+              shape={floorShape}
+              floorType={floorType}
+              floorColor={floorColor}
+            />
 
-            {/* Furniture: one mesh per placed item, positioned from the
-                exact same data the 2D floor planner uses - same
-                widthCm/depthCm/position, just converted to meters. If
-                the product has a real 3D model attached in Shopify, we
-                render THAT (see PlacedFurnitureMesh); otherwise we fall
-                back to a plain placeholder box so the room still shows
-                something roughly the right size and shape. Wrapped in
-                Suspense since loading a .glb file is asynchronous - the
-                fallback lets already-loaded items keep showing while a
-                new one is still fetching. */}
+            {walls.map((w, i) => (
+              <Wall key={i} wall={w} heightM={heightM} color={wallColor} />
+            ))}
+
+            {/* Baseboards: a thin trim strip along the foot of each wall,
+                just inside the room */}
+            {walls.map((w, i) => (
+              <mesh
+                key={`bb-${i}`}
+                position={[
+                  w.edgeMidX - w.outwardX * 0.01,
+                  BASEBOARD_HEIGHT_M / 2,
+                  w.edgeMidZ - w.outwardZ * 0.01,
+                ]}
+                rotation={[0, w.angleY, 0]}
+                receiveShadow
+              >
+                <boxGeometry args={[w.edgeLength, BASEBOARD_HEIGHT_M, 0.02]} />
+                <meshStandardMaterial color="#fbfaf7" roughness={0.5} />
+              </mesh>
+            ))}
+
+            {/* Furniture, from the same data the 2D planner uses. Real
+                .glb models where a product has one, nice placeholder
+                boxes otherwise. Suspense because loading a model file is
+                asynchronous. */}
             <Suspense fallback={null}>
               {placedItems.map((item) => (
                 <PlacedFurnitureMesh key={item.id} item={item} />
               ))}
             </Suspense>
 
-            {/* Lets you click-drag to orbit, scroll to zoom, right-click
-                drag to pan - "target" is the point the camera orbits
-                around, set to the room's center */}
             <OrbitControls
-              target={[roomWidthM / 2, heightM / 2, roomDepthM / 2]}
+              target={[roomWidthM / 2, heightM * 0.3, roomDepthM / 2]}
+              maxPolarAngle={Math.PI / 2 - 0.05}
+              minDistance={maxDim * 0.4}
+              maxDistance={maxDim * 3}
+              enableDamping
             />
           </Canvas>
         ) : (
@@ -168,6 +237,108 @@ export default function Walkthrough() {
       </div>
     </div>
   );
+}
+
+// The floor: a polygon filled with the chosen material. For tile/hardwood/
+// concrete the painted picture (see lib/flooring.ts) is repeated across
+// the floor at real-world scale; "custom" is just a flat color.
+function Floor({
+  shape,
+  floorType,
+  floorColor,
+}: {
+  shape: Shape;
+  floorType: FloorId;
+  floorColor: string;
+}) {
+  const gl = useThree((state) => state.gl);
+
+  const texture = useMemo(() => {
+    if (floorType === "custom") return null;
+    const canvas = paintFloorCanvas(floorType, 1024);
+    if (!canvas) return null;
+    const t = new CanvasTexture(canvas);
+    t.wrapS = t.wrapT = RepeatWrapping;
+    t.colorSpace = SRGBColorSpace;
+    t.anisotropy = Math.min(8, gl.capabilities.getMaxAnisotropy());
+    // ShapeGeometry UVs are in meters, and one picture covers
+    // FLOOR_PERIOD_CM, so this keeps tiles/planks at true size.
+    const repeat = 100 / FLOOR_PERIOD_CM;
+    t.repeat.set(repeat, repeat);
+    return t;
+  }, [floorType, gl]);
+
+  useEffect(() => () => texture?.dispose(), [texture]);
+
+  const option = floorType === "custom" ? null : getFloorOption(floorType);
+
+  return (
+    <mesh rotation={[-Math.PI / 2, 0, 0]} receiveShadow>
+      <shapeGeometry args={[shape]} />
+      <meshStandardMaterial
+        key={texture ? texture.uuid : "flat"}
+        map={texture ?? undefined}
+        color={texture ? "#ffffff" : floorColor}
+        roughness={option?.roughness ?? 0.8}
+        side={DoubleSide}
+      />
+    </mesh>
+  );
+}
+
+// One wall slab. Walls between the camera and the room's inside fade to
+// nearly see-through so you can always look in, while the walls behind
+// stay solid - which makes the room read as a room.
+function Wall({
+  wall,
+  heightM,
+  color,
+}: {
+  wall: ReturnType<typeof getWallSegments>[number];
+  heightM: number;
+  color: string;
+}) {
+  const meshRef = useRef<Mesh>(null);
+  const opacity = useRef(1);
+
+  useFrame(({ camera }, delta) => {
+    const mesh = meshRef.current;
+    if (!mesh) return;
+    const towardCamera =
+      (camera.position.x - wall.edgeMidX) * wall.outwardX +
+      (camera.position.z - wall.edgeMidZ) * wall.outwardZ;
+    const target = towardCamera > 0 ? 0.08 : 1;
+    opacity.current = MathUtils.damp(opacity.current, target, 8, delta);
+    const material = mesh.material as MeshStandardMaterial;
+    material.opacity = opacity.current;
+    material.depthWrite = opacity.current > 0.5;
+    mesh.castShadow = opacity.current > 0.5;
+  });
+
+  return (
+    <mesh
+      ref={meshRef}
+      position={[wall.centerX, heightM / 2, wall.centerZ]}
+      rotation={[0, wall.angleY, 0]}
+      receiveShadow
+    >
+      <boxGeometry args={[wall.length, heightM, WALL_THICKNESS_M]} />
+      {/* Always "transparent" so fading never needs a shader rebuild */}
+      <meshStandardMaterial color={color} roughness={0.95} transparent />
+    </mesh>
+  );
+}
+
+// A stable, pleasant wood-ish tone per product, so different placeholder
+// boxes are told apart in the room.
+function placeholderColor(productId: string) {
+  let h = 0;
+  for (let i = 0; i < productId.length; i++) {
+    h = (h * 31 + productId.charCodeAt(i)) >>> 0;
+  }
+  const hue = 22 + (h % 18);
+  const light = 38 + ((h >> 5) % 14);
+  return `hsl(${hue}, 38%, ${light}%)`;
 }
 
 // Works out this item's position and rotation (shared by both the real
@@ -185,7 +356,10 @@ function PlacedFurnitureMesh({ item }: { item: PlacedItem }) {
   );
   const x = item.position.x / 100 + footprint.width / 100 / 2;
   const z = item.position.z / 100 + footprint.depth / 100 / 2;
-  const rotationYRadians = (item.rotationY * Math.PI) / 180;
+  // three.js turns the opposite way round to the 2D plan's CSS
+  // rotation (clockwise on screen), so the angle is negated here so
+  // that an item faces the same way in 3D as it did in the plan.
+  const rotationYRadians = -(item.rotationY * Math.PI) / 180;
 
   if (item.modelUrl) {
     return (
@@ -203,13 +377,20 @@ function PlacedFurnitureMesh({ item }: { item: PlacedItem }) {
   const itemDepthM = item.depthCm / 100;
 
   return (
-    <mesh
+    <RoundedBox
+      args={[itemWidthM, itemHeightM, itemDepthM]}
+      radius={Math.min(0.03, itemWidthM / 4, itemHeightM / 4, itemDepthM / 4)}
+      smoothness={4}
       position={[x, itemHeightM / 2, z]}
       rotation={[0, rotationYRadians, 0]}
+      castShadow
+      receiveShadow
     >
-      <boxGeometry args={[itemWidthM, itemHeightM, itemDepthM]} />
-      <meshStandardMaterial color="#8a6d4b" />
-    </mesh>
+      <meshStandardMaterial
+        color={placeholderColor(item.productId)}
+        roughness={0.6}
+      />
+    </RoundedBox>
   );
 }
 
@@ -246,7 +427,16 @@ function RealModel({
 
   // Cloned so that placing the same product twice doesn't have both
   // copies fighting over one shared Object3D instance.
-  const clonedScene = useMemo(() => scene.clone(), [scene]);
+  const clonedScene = useMemo(() => {
+    const clone = scene.clone();
+    clone.traverse((obj) => {
+      if ((obj as Mesh).isMesh) {
+        obj.castShadow = true;
+        obj.receiveShadow = true;
+      }
+    });
+    return clone;
+  }, [scene]);
 
   const { scale, centerOffset, bottomY } = useMemo(() => {
     const box = new Box3().setFromObject(clonedScene);
