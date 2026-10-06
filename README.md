@@ -2,7 +2,7 @@
 
 Design a room, furnish it with **real products you can actually buy**, walk through it in 3D, and check out.
 
-> 📹 _Demo video / GIF goes here_ &nbsp;·&nbsp; 🔗 _Live demo link goes here_
+ &nbsp;·&nbsp; 🔗 https://roomify-zz16.onrender.com 
 
 Roomify pulls live furniture (name, price, photo, real-world dimensions, and optionally a 3D model) from a Shopify store. You draw your room, drag furniture into a to-scale floor plan, then view it as a textured 3D scene or walk around inside it. When you're happy, "Buy this room" builds a real Shopify cart and sends you to Shopify's hosted checkout.
 
