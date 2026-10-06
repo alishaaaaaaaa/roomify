@@ -7,7 +7,8 @@
     "dev": "react-router dev",
     "start": "react-router-serve ./build/server/index.js",
     "typecheck": "react-router typegen && tsc",
-    "generate-models": "node --env-file=.env scripts/generate-3d-models.mjs"
+    "generate-models": "node --env-file=.env scripts/generate-3d-models.mjs",
+    "test": "vitest run"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",
@@ -32,6 +33,7 @@
     "@types/react-dom": "19.2.7",
     "tailwindcss": "^4.2.2",
     "typescript": "^5.9.3",
-    "vite": "^8.0.3"
+    "vite": "^8.0.3",
+    "vitest": "^5.0.3"
   }
 }
